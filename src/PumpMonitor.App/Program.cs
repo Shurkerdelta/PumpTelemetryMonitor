@@ -1,15 +1,16 @@
 ﻿using System.Text;
 using System.Threading.Channels;
 using PumpMonitor.App;
+using PumpMonitor.Core;
 using PumpMonitor.Core.Devices;
 using PumpMonitor.Core.Processing;
 using PumpMonitor.Core.Telemetry;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-int deviceCount = Random.Shared.Next(3, 6);
+int deviceCount = Random.Shared.Next(Constants.Simulation.MinDeviceCount, Constants.Simulation.MaxDeviceCount + 1);
 SimulatedDevice[] devices = Enumerable.Range(1, deviceCount)
-    .Select(i => new SimulatedDevice($"pump-{i}"))
+    .Select(i => new SimulatedDevice($"{Constants.Simulation.DeviceIdPrefix}{i}"))
     .ToArray();
 var commands = new DeviceCommandHandler(devices);
 
@@ -41,7 +42,7 @@ ui.Close();
 // Graceful shutdown: stop producers first, then let the pipeline drain what's queued (bounded by a timeout).
 shutdown.Cancel();
 await Task.WhenAll(producers);
-using (var drainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+using (var drainTimeout = new CancellationTokenSource(Constants.Pipeline.DrainTimeout))
 {
     await pipeline.StopAsync(drainTimeout.Token);
 }

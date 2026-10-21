@@ -24,12 +24,14 @@ public class PumpProcessModelTests
         var options = new PumpProcessOptions();
         var model = new PumpProcessModel(options, new Random(42));
 
-        ProcessState running = RunFor(model, isRunning: true, TimeSpan.FromSeconds(90));
-        ProcessState stopped = RunFor(model, isRunning: false, TimeSpan.FromSeconds(120));
+        // Run each phase for 6+ temperature time constants (30s) so both values have settled.
+        ProcessState running = RunFor(model, isRunning: true, TimeSpan.FromSeconds(200));
+        ProcessState stopped = RunFor(model, isRunning: false, TimeSpan.FromSeconds(200));
 
-        Assert.InRange(running.Pressure, options.RunningPressure - 10, options.RunningPressure + 10);
+        // Noise keeps settled values wobbling by about ±1 MPa / ±1 °C, so allow a few units either side.
+        Assert.InRange(running.Pressure, options.RunningPressure - 3, options.RunningPressure + 3);
         Assert.InRange(running.Temperature, options.RunningTemperature - 3, options.RunningTemperature + 3);
-        Assert.InRange(stopped.Pressure, options.IdlePressure, options.IdlePressure + 10);
+        Assert.InRange(stopped.Pressure, 0, options.IdlePressure + 3);
         Assert.InRange(stopped.Temperature, options.IdleTemperature - 3, options.IdleTemperature + 3);
     }
 
@@ -47,10 +49,10 @@ public class PumpProcessModelTests
         Assert.All(warmUp.Zip(warmUp.Skip(1)), p => Assert.True(p.Second.Pressure > p.First.Pressure && p.Second.Temperature > p.First.Temperature));
         Assert.All(coolDown.Zip(coolDown.Skip(1)), p => Assert.True(p.Second.Pressure < p.First.Pressure && p.Second.Temperature < p.First.Temperature));
 
-        // After one pressure time constant (3s) pressure is ~63% of the way there; temperature much less.
-        ProcessState at3s = warmUp[11];
-        double pressureProgress = (at3s.Pressure - options.IdlePressure) / (options.RunningPressure - options.IdlePressure);
-        double temperatureProgress = (at3s.Temperature - options.IdleTemperature) / (options.RunningTemperature - options.IdleTemperature);
+        // After one pressure time constant (5s = 20 ticks) pressure is ~63% of the way there; temperature much less.
+        ProcessState at5s = warmUp[19];
+        double pressureProgress = (at5s.Pressure - options.IdlePressure) / (options.RunningPressure - options.IdlePressure);
+        double temperatureProgress = (at5s.Temperature - options.IdleTemperature) / (options.RunningTemperature - options.IdleTemperature);
         Assert.InRange(pressureProgress, 0.6, 0.66);
         Assert.True(temperatureProgress < 0.25, $"temperature progress {temperatureProgress:P0}");
     }

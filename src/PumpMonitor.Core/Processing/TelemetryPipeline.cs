@@ -38,7 +38,7 @@ public sealed class TelemetryPipeline : IAsyncDisposable
     public TelemetryPipeline(
         IEnumerable<ITelemetryHandler> handlers,
         Action<TelemetryReading, Exception> onHandlerError,
-        int capacity = 1000)
+        int capacity = Constants.Pipeline.QueueCapacity)
     {
         ArgumentNullException.ThrowIfNull(handlers);
         ArgumentNullException.ThrowIfNull(onHandlerError);

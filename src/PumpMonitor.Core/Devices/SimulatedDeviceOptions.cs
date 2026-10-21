@@ -4,11 +4,11 @@ namespace PumpMonitor.Core.Devices;
 public sealed record SimulatedDeviceOptions
 {
     /// <summary>Shortest delay between readings.</summary>
-    public TimeSpan MinInterval { get; init; } = TimeSpan.FromMilliseconds(100);
+    public TimeSpan MinInterval { get; init; } = Constants.Simulation.MinReadingInterval;
 
     /// <summary>Longest delay between readings. Set equal to <see cref="MinInterval"/> for a fixed rate.</summary>
-    public TimeSpan MaxInterval { get; init; } = TimeSpan.FromMilliseconds(500);
+    public TimeSpan MaxInterval { get; init; } = Constants.Simulation.MaxReadingInterval;
 
     /// <summary>Whether the pump is running when the device is created.</summary>
-    public bool StartOn { get; init; } = true;
+    public bool StartOn { get; init; } = Constants.Simulation.StartOn;
 }
