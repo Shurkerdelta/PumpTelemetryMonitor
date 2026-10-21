@@ -1,5 +1,6 @@
 ﻿using System.Text;
 using System.Threading.Channels;
+using PumpMonitor.App;
 using PumpMonitor.Core.Devices;
 using PumpMonitor.Core.Telemetry;
 
@@ -10,6 +11,9 @@ SimulatedDevice[] devices = Enumerable.Range(1, deviceCount)
     .Select(i => new SimulatedDevice($"pump-{i}"))
     .ToArray();
 var commands = new DeviceCommandHandler(devices);
+
+// All console output goes through one object so log lines never break up the operator's typing.
+var ui = new ConsoleUi();
 
 // All devices write to one channel; a single consumer logs readings so producers never block on the console.
 var channel = Channel.CreateUnbounded<TelemetryReading>(new UnboundedChannelOptions { SingleReader = true });
@@ -22,22 +26,23 @@ Console.CancelKeyPress += (_, e) =>
     shutdown.Cancel();
 };
 
-Task[] producers = devices.Select(d => RunDeviceAsync(d, channel.Writer, shutdown.Token)).ToArray();
-Task consumer = LogReadingsAsync(channel.Reader);
+Task[] producers = devices.Select(d => RunDeviceAsync(d, channel.Writer, ui, shutdown.Token)).ToArray();
+Task consumer = LogReadingsAsync(channel.Reader, ui);
 
-Console.WriteLine($"Started {deviceCount} devices: {string.Join(", ", devices.Select(d => d.DeviceId))}");
-Console.WriteLine(DeviceCommandHandler.HelpText);
+ui.WriteLine($"Started {deviceCount} devices: {string.Join(", ", devices.Select(d => d.DeviceId))}");
+ui.WriteLine(DeviceCommandHandler.HelpText);
 
-await ReadCommandsAsync(commands, shutdown);
+await ReadCommandsAsync(commands, ui, shutdown);
+ui.Close();
 
 // Graceful shutdown: stop producers, then let the consumer drain whatever is left in the channel.
 shutdown.Cancel();
 await Task.WhenAll(producers);
 channel.Writer.Complete();
 await consumer;
-Console.WriteLine("All devices stopped.");
+ui.WriteLine("All devices stopped.");
 
-static async Task RunDeviceAsync(SimulatedDevice device, ChannelWriter<TelemetryReading> writer, CancellationToken cancellationToken)
+static async Task RunDeviceAsync(SimulatedDevice device, ChannelWriter<TelemetryReading> writer, ConsoleUi ui, CancellationToken cancellationToken)
 {
     // Report a crashed device as soon as it happens, and never let it fault the producer task:
     // shutdown awaits all producers before completing the channel, so a throw there would skip the drain.
@@ -47,28 +52,28 @@ static async Task RunDeviceAsync(SimulatedDevice device, ChannelWriter<Telemetry
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"{device.DeviceId} stopped unexpectedly: {ex.Message}");
+        ui.WriteError($"{device.DeviceId} stopped unexpectedly: {ex.Message}");
     }
 }
 
-static async Task LogReadingsAsync(ChannelReader<TelemetryReading> reader)
+static async Task LogReadingsAsync(ChannelReader<TelemetryReading> reader, ConsoleUi ui)
 {
     await foreach (TelemetryReading r in reader.ReadAllAsync())
     {
-        Console.WriteLine(
+        ui.WriteLine(
             $"{r.Timestamp.ToLocalTime():HH:mm:ss.fff}  {r.DeviceId,-7} #{r.SequenceNumber,-5} " +
             $"P={r.Pressure,6:F1} psi  T={r.Temperature,5:F1} °C");
     }
 }
 
-static async Task ReadCommandsAsync(DeviceCommandHandler commands, CancellationTokenSource shutdown)
+static async Task ReadCommandsAsync(DeviceCommandHandler commands, ConsoleUi ui, CancellationTokenSource shutdown)
 {
-    // Console.ReadLine blocks and can't be cancelled, so run it in the background and race it
+    // Reading input blocks and can't be cancelled, so run it in the background and race it
     // against shutdown (e.g. Ctrl+C). An abandoned read is harmless once the process exits.
     Task cancelled = Task.Delay(Timeout.Infinite, shutdown.Token);
     while (true)
     {
-        Task<string?> read = Task.Run(Console.ReadLine);
+        Task<string?> read = Task.Run(ui.ReadLine);
         if (await Task.WhenAny(read, cancelled) == cancelled)
         {
             return;
@@ -83,7 +88,7 @@ static async Task ReadCommandsAsync(DeviceCommandHandler commands, CancellationT
         CommandResult result = commands.Execute(line);
         if (result.Message.Length > 0)
         {
-            Console.WriteLine(result.Message);
+            ui.WriteLine(result.Message);
         }
 
         if (result.ExitRequested)
