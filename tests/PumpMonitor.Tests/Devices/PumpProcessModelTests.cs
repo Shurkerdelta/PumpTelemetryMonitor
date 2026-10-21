@@ -36,9 +36,27 @@ public class PumpProcessModelTests
     }
 
     [Fact]
+    public void IdlePressure_StaysNearIdleTarget_BecauseNoiseScalesWithPressure()
+    {
+        var options = new PumpProcessOptions();
+        var model = new PumpProcessModel(options, new Random(7));
+        var idle = new List<ProcessState>();
+
+        // Run, switch off, let pressure settle (12 time constants), then sample the idle phase.
+        RunFor(model, isRunning: true, TimeSpan.FromSeconds(30));
+        RunFor(model, isRunning: false, TimeSpan.FromSeconds(60));
+        RunFor(model, isRunning: false, TimeSpan.FromSeconds(60), idle);
+
+        // A fixed 0.5 MPa noise used to swamp the 0.3 MPa idle pressure: readings hit the zero clamp
+        // and averaged more than double the target. Relative noise keeps them tight and unbiased.
+        Assert.All(idle, s => Assert.InRange(s.Pressure, options.IdlePressure - 0.05, options.IdlePressure + 0.05));
+        Assert.InRange(idle.Average(s => s.Pressure), options.IdlePressure - 0.01, options.IdlePressure + 0.01);
+    }
+
+    [Fact]
     public void WithoutNoise_FollowsMonotonicCurveAndTemperatureLagsPressure()
     {
-        var options = new PumpProcessOptions { PressureNoise = 0, TemperatureNoise = 0 };
+        var options = new PumpProcessOptions { RelativePressureNoise = 0, TemperatureNoise = 0 };
         var model = new PumpProcessModel(options);
         var warmUp = new List<ProcessState>();
         var coolDown = new List<ProcessState>();

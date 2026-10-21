@@ -30,7 +30,10 @@ public sealed class PumpProcessModel : IPumpProcess
         double pressureTarget = isRunning ? _options.RunningPressure : _options.IdlePressure;
         double temperatureTarget = isRunning ? _options.RunningTemperature : _options.IdleTemperature;
 
-        _pressure = Step(_pressure, pressureTarget, _options.PressureTimeConstant, _options.PressureNoise, elapsed);
+        // Pressure noise is plunger pulsation, which scales with pressure; a fixed amount would swamp the
+        // small idle (suction) pressure and keep hitting the zero clamp below, biasing idle readings upward.
+        double pressureNoise = _options.RelativePressureNoise * _pressure;
+        _pressure = Step(_pressure, pressureTarget, _options.PressureTimeConstant, pressureNoise, elapsed);
         _temperature = Step(_temperature, temperatureTarget, _options.TemperatureTimeConstant, _options.TemperatureNoise, elapsed);
 
         // Gauge pressure can't go below zero, however noisy the simulation.

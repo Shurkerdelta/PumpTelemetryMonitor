@@ -3,9 +3,15 @@ using PumpMonitor.Core.Telemetry;
 
 namespace PumpMonitor.Tests.Processing;
 
-public class TelemetryPipelineTests
+public class TelemetryPipelineTests : IDisposable
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
+
+    // The pipeline swallows exceptions from its error callback, so unexpected handler errors are
+    // recorded here and checked after each test instead of failing inside the callback.
+    private readonly List<string> _unexpectedErrors = [];
+
+    public void Dispose() => Assert.Empty(_unexpectedErrors);
 
     private static TelemetryReading Reading(string deviceId, long sequence) =>
         new(deviceId, DateTimeOffset.UnixEpoch, 100, 50, sequence);
@@ -56,8 +62,8 @@ public class TelemetryPipelineTests
                 : ValueTask.CompletedTask;
     }
 
-    private static readonly Action<TelemetryReading, Exception> FailOnHandlerError =
-        (reading, ex) => Assert.Fail($"Handler failed on {reading}: {ex}");
+    private void FailOnHandlerError(TelemetryReading reading, Exception ex) =>
+        _unexpectedErrors.Add($"Handler failed on {reading}: {ex}");
 
     [Fact]
     public async Task ConcurrentProducers_AllReadingsDeliveredInPerDeviceOrder()
@@ -172,6 +178,31 @@ public class TelemetryPipelineTests
         (TelemetryReading reading, Exception error) = Assert.Single(errors);
         Assert.Equal(2, reading.SequenceNumber);
         Assert.IsType<InvalidOperationException>(error);
+        Assert.Equal([1L, 2, 3], recorder.Readings.Select(r => r.SequenceNumber));
+    }
+
+    [Fact]
+    public async Task ThrowingErrorCallback_DoesNotStopProcessing()
+    {
+        var recorder = new RecordingHandler();
+        int callbackCalls = 0;
+        await using var pipeline = new TelemetryPipeline(
+            [new ThrowingHandler(failOnSequence: 1), recorder],
+            (_, _) =>
+            {
+                callbackCalls++;
+                throw new InvalidOperationException("callback failed");
+            });
+        pipeline.Start();
+        for (long seq = 1; seq <= 3; seq++)
+        {
+            await pipeline.Writer.WriteAsync(Reading("pump-1", seq));
+        }
+
+        // StopAsync would rethrow if the consumer had died.
+        await pipeline.StopAsync().WaitAsync(Timeout);
+
+        Assert.Equal(1, callbackCalls);
         Assert.Equal([1L, 2, 3], recorder.Readings.Select(r => r.SequenceNumber));
     }
 

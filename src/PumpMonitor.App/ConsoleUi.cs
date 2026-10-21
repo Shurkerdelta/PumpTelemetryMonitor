@@ -40,6 +40,8 @@ internal sealed class ConsoleUi
 
         lock (_gate)
         {
+            // The previous Enter (or a log line since) may have left a prompt drawn; replace it, don't append.
+            ClearPromptLine();
             DrawPrompt();
         }
 

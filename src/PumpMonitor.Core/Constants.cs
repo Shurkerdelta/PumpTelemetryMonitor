@@ -52,8 +52,11 @@ public static class Constants
         /// </summary>
         public static readonly TimeSpan TemperatureTimeConstant = TimeSpan.FromSeconds(30);
 
-        /// <summary>Standard deviation in MPa per √second; plunger pulsation is a few percent of discharge pressure.</summary>
-        public const double PressureNoise = 0.5;
+        /// <summary>
+        /// Standard deviation per √second as a fraction of the current pressure (~0.55 MPa at 55 MPa);
+        /// plunger pulsation is a few percent of discharge pressure.
+        /// </summary>
+        public const double RelativePressureNoise = 0.01;
 
         /// <summary>Standard deviation in °C per √second.</summary>
         public const double TemperatureNoise = 0.2;

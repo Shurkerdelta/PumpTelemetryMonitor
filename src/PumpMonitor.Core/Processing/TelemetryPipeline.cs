@@ -33,6 +33,7 @@ public sealed class TelemetryPipeline : IAsyncDisposable
     /// <param name="handlers">Steps run for each reading, in the order given.</param>
     /// <param name="onHandlerError">
     /// Called when a handler throws. The pipeline carries on with the remaining handlers and readings.
+    /// Exceptions thrown by the callback itself are ignored.
     /// </param>
     /// <param name="capacity">Maximum queued readings before the oldest are dropped.</param>
     public TelemetryPipeline(
@@ -111,13 +112,26 @@ public sealed class TelemetryPipeline : IAsyncDisposable
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException || !_abort.IsCancellationRequested)
                     {
-                        _onHandlerError(reading, ex);
+                        ReportHandlerError(reading, ex);
                     }
                 }
             }
         }
         catch (OperationCanceledException) when (_abort.IsCancellationRequested)
         {
+        }
+    }
+
+    private void ReportHandlerError(TelemetryReading reading, Exception ex)
+    {
+        try
+        {
+            _onHandlerError(reading, ex);
+        }
+        catch
+        {
+            // A failing error callback must not kill the consumer: producers would keep writing into a
+            // queue nobody reads, silently dropping everything until shutdown. There's nowhere left to report it.
         }
     }
 }

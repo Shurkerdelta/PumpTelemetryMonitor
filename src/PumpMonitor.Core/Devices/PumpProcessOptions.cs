@@ -21,8 +21,11 @@ public sealed record PumpProcessOptions
     /// <summary>Time to cover ~63% of the gap to the temperature target. Temperature lags pressure.</summary>
     public TimeSpan TemperatureTimeConstant { get; init; } = Constants.PumpProcess.TemperatureTimeConstant;
 
-    /// <summary>Random pressure fluctuation, as a standard deviation (MPa) per √second.</summary>
-    public double PressureNoise { get; init; } = Constants.PumpProcess.PressureNoise;
+    /// <summary>
+    /// Random pressure fluctuation, as a standard deviation per √second expressed as a fraction of the
+    /// current pressure (0.01 = 1%), so the wobble shrinks along with the pressure when the pump is off.
+    /// </summary>
+    public double RelativePressureNoise { get; init; } = Constants.PumpProcess.RelativePressureNoise;
 
     /// <summary>Random temperature fluctuation, as a standard deviation (°C) per √second.</summary>
     public double TemperatureNoise { get; init; } = Constants.PumpProcess.TemperatureNoise;
