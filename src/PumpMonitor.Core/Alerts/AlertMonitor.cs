@@ -31,7 +31,7 @@ public sealed class AlertMonitor : ITelemetryHandler
     private AlertOptions _options;
 
     /// <param name="onAlert">Receives each alert. Called outside the internal lock, from either thread.</param>
-    /// <param name="options">Thresholds; defaults to <see cref="Constants.Alerts"/>.</param>
+    /// <param name="options">Thresholds; defaults to a new <see cref="AlertOptions"/>.</param>
     /// <param name="expectedDeviceIds">
     /// Devices to watch from the start, so one that never reports at all is still flagged as silent.
     /// </param>

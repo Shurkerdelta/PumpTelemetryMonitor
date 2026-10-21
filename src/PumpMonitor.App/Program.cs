@@ -9,14 +9,22 @@ using PumpMonitor.Core.Telemetry;
 
 Console.OutputEncoding = Encoding.UTF8;
 
+// App-level settings. Per-component defaults (pump behaviour, reading intervals, alert thresholds)
+// live on their options records: PumpProcessOptions, SimulatedDeviceOptions and AlertOptions.
+const int MinDeviceCount = 3;
+const int MaxDeviceCount = 5;
+const string DeviceIdPrefix = "pump-";
+TimeSpan silenceCheckInterval = TimeSpan.FromMilliseconds(500); // bounds how late a silence alert can be
+TimeSpan drainTimeout = TimeSpan.FromSeconds(5);                // how long shutdown waits for queued readings
+
 // Every reading is too noisy for normal use, so they start hidden. Pass --show-readings (or -v) to start
 // with them printed for debugging; the 'readings on|off' command flips this while running.
 var showReadings = new Toggle(args.Any(a => a is "--show-readings" or "-v"));
 string[] unknownArgs = args.Where(a => a is not ("--show-readings" or "-v")).ToArray();
 
-int deviceCount = Random.Shared.Next(Constants.Simulation.MinDeviceCount, Constants.Simulation.MaxDeviceCount + 1);
+int deviceCount = Random.Shared.Next(MinDeviceCount, MaxDeviceCount + 1);
 SimulatedDevice[] devices = Enumerable.Range(1, deviceCount)
-    .Select(i => new SimulatedDevice($"{Constants.Simulation.DeviceIdPrefix}{i}"))
+    .Select(i => new SimulatedDevice($"{DeviceIdPrefix}{i}"))
     .ToArray();
 
 // All console output goes through one object so log lines never break up the operator's typing.
@@ -43,7 +51,7 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 Task[] producers = devices.Select(d => RunDeviceAsync(d, pipeline.Writer, ui, shutdown.Token)).ToArray();
-Task silenceWatch = alerts.RunSilenceWatchAsync(Constants.Alerts.SilenceCheckInterval, shutdown.Token);
+Task silenceWatch = alerts.RunSilenceWatchAsync(silenceCheckInterval, shutdown.Token);
 
 if (unknownArgs.Length > 0)
 {
@@ -63,9 +71,9 @@ ui.Close();
 // then let the pipeline drain what's queued (bounded by a timeout).
 shutdown.Cancel();
 await Task.WhenAll([.. producers, silenceWatch]);
-using (var drainTimeout = new CancellationTokenSource(Constants.Pipeline.DrainTimeout))
+using (var drainCts = new CancellationTokenSource(drainTimeout))
 {
-    await pipeline.StopAsync(drainTimeout.Token);
+    await pipeline.StopAsync(drainCts.Token);
 }
 
 if (pipeline.DroppedCount > 0)

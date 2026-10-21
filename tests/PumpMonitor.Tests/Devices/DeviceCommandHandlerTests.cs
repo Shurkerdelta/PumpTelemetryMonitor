@@ -132,7 +132,8 @@ public class DeviceCommandHandlerTests
     {
         var withAlerts = new DeviceCommandHandler(_devices, new AlertMonitor(_ => { }));
 
-        Assert.Contains("69.00 MPa", withAlerts.Execute("threshold").Message);
+        string defaultPressure = $"{new AlertOptions().PressureThreshold:F2} MPa";
+        Assert.Contains(defaultPressure, withAlerts.Execute("threshold").Message);
         Assert.Equal("Alerts are not enabled.", CreateHandler().Execute("threshold").Message);
     }
 

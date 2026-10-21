@@ -35,11 +35,14 @@ public sealed class TelemetryPipeline : IAsyncDisposable
     /// Called when a handler throws. The pipeline carries on with the remaining handlers and readings.
     /// Exceptions thrown by the callback itself are ignored.
     /// </param>
-    /// <param name="capacity">Maximum queued readings before the oldest are dropped.</param>
+    /// <param name="capacity">
+    /// Maximum queued readings before the oldest are dropped. 1000 is several seconds of readings from a
+    /// handful of devices: room for brief stalls without holding a backlog of stale data.
+    /// </param>
     public TelemetryPipeline(
         IEnumerable<ITelemetryHandler> handlers,
         Action<TelemetryReading, Exception> onHandlerError,
-        int capacity = Constants.Pipeline.QueueCapacity)
+        int capacity = 1000)
     {
         ArgumentNullException.ThrowIfNull(handlers);
         ArgumentNullException.ThrowIfNull(onHandlerError);
