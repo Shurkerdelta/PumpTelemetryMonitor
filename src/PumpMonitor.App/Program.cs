@@ -2,6 +2,7 @@
 using System.Threading.Channels;
 using PumpMonitor.App;
 using PumpMonitor.Core.Devices;
+using PumpMonitor.Core.Processing;
 using PumpMonitor.Core.Telemetry;
 
 Console.OutputEncoding = Encoding.UTF8;
@@ -15,8 +16,11 @@ var commands = new DeviceCommandHandler(devices);
 // All console output goes through one object so log lines never break up the operator's typing.
 var ui = new ConsoleUi();
 
-// All devices write to one channel; a single consumer logs readings so producers never block on the console.
-var channel = Channel.CreateUnbounded<TelemetryReading>(new UnboundedChannelOptions { SingleReader = true });
+// All devices write into the pipeline; its single consumer runs the handlers so producers never wait on them.
+await using var pipeline = new TelemetryPipeline(
+    [new ConsoleLogHandler(ui)],
+    (reading, ex) => ui.WriteError($"Handler failed on {reading.DeviceId} #{reading.SequenceNumber}: {ex.Message}"));
+pipeline.Start();
 
 using var shutdown = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -26,8 +30,7 @@ Console.CancelKeyPress += (_, e) =>
     shutdown.Cancel();
 };
 
-Task[] producers = devices.Select(d => RunDeviceAsync(d, channel.Writer, ui, shutdown.Token)).ToArray();
-Task consumer = LogReadingsAsync(channel.Reader, ui);
+Task[] producers = devices.Select(d => RunDeviceAsync(d, pipeline.Writer, ui, shutdown.Token)).ToArray();
 
 ui.WriteLine($"Started {deviceCount} devices: {string.Join(", ", devices.Select(d => d.DeviceId))}");
 ui.WriteLine(DeviceCommandHandler.HelpText);
@@ -35,11 +38,19 @@ ui.WriteLine(DeviceCommandHandler.HelpText);
 await ReadCommandsAsync(commands, ui, shutdown);
 ui.Close();
 
-// Graceful shutdown: stop producers, then let the consumer drain whatever is left in the channel.
+// Graceful shutdown: stop producers first, then let the pipeline drain what's queued (bounded by a timeout).
 shutdown.Cancel();
 await Task.WhenAll(producers);
-channel.Writer.Complete();
-await consumer;
+using (var drainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+{
+    await pipeline.StopAsync(drainTimeout.Token);
+}
+
+if (pipeline.DroppedCount > 0)
+{
+    ui.WriteLine($"{pipeline.DroppedCount} readings were dropped because processing fell behind.");
+}
+
 ui.WriteLine("All devices stopped.");
 
 static async Task RunDeviceAsync(SimulatedDevice device, ChannelWriter<TelemetryReading> writer, ConsoleUi ui, CancellationToken cancellationToken)
@@ -53,16 +64,6 @@ static async Task RunDeviceAsync(SimulatedDevice device, ChannelWriter<Telemetry
     catch (Exception ex)
     {
         ui.WriteError($"{device.DeviceId} stopped unexpectedly: {ex.Message}");
-    }
-}
-
-static async Task LogReadingsAsync(ChannelReader<TelemetryReading> reader, ConsoleUi ui)
-{
-    await foreach (TelemetryReading r in reader.ReadAllAsync())
-    {
-        ui.WriteLine(
-            $"{r.Timestamp.ToLocalTime():HH:mm:ss.fff}  {r.DeviceId,-7} #{r.SequenceNumber,-5} " +
-            $"P={r.Pressure,6:F1} psi  T={r.Temperature,5:F1} °C");
     }
 }
 
