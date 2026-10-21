@@ -1,7 +1,7 @@
 namespace PumpMonitor.Core.Devices;
 
-/// <summary>Tuning for <see cref="PumpSensorModel"/>.</summary>
-public sealed record PumpSensorOptions
+/// <summary>Tuning for <see cref="PumpProcessModel"/>.</summary>
+public sealed record PumpProcessOptions
 {
     /// <summary>Pressure (psi) the pump settles at while running.</summary>
     public double RunningPressure { get; init; } = 120;

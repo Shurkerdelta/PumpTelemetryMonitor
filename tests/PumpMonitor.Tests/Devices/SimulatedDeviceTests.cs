@@ -17,8 +17,8 @@ public class SimulatedDeviceTests
     public void TakeReading_ReportsStubbedValuesWithIncreasingSequenceAndTimestamps()
     {
         var time = new FakeTimeProvider();
-        var sensor = new StubSensorModel(new SensorSample(100, 50), new SensorSample(250, 51));
-        var device = new SimulatedDevice("pump-1", sensor, FixedRate, time);
+        var process = new StubPumpProcess(new ProcessState(100, 50), new ProcessState(250, 51));
+        var device = new SimulatedDevice("pump-1", process, FixedRate, time);
 
         TelemetryReading first = device.TakeReading();
         time.Advance(TimeSpan.FromMilliseconds(200));
@@ -29,11 +29,11 @@ public class SimulatedDeviceTests
     }
 
     [Fact]
-    public void TakeReading_PassesOnOffStateAndElapsedTimeToSensor()
+    public void TakeReading_PassesOnOffStateAndElapsedTimeToProcess()
     {
         var time = new FakeTimeProvider();
-        var sensor = new StubSensorModel(new SensorSample(0, 20));
-        var device = new SimulatedDevice("pump-1", sensor, FixedRate with { StartOn = false }, time);
+        var process = new StubPumpProcess(new ProcessState(0, 20));
+        var device = new SimulatedDevice("pump-1", process, FixedRate with { StartOn = false }, time);
 
         device.TakeReading();
         device.TurnOn();
@@ -49,7 +49,7 @@ public class SimulatedDeviceTests
                 (true, TimeSpan.FromMilliseconds(300)),
                 (false, TimeSpan.FromMilliseconds(150)),
             ],
-            sensor.Calls);
+            process.Calls);
     }
 
     [Theory]
@@ -71,7 +71,7 @@ public class SimulatedDeviceTests
     {
         var time = new FakeTimeProvider();
         var channel = Channel.CreateUnbounded<TelemetryReading>();
-        var device = new SimulatedDevice("pump-1", new StubSensorModel(new SensorSample(1, 1)), FixedRate, time);
+        var device = new SimulatedDevice("pump-1", new StubPumpProcess(new ProcessState(1, 1)), FixedRate, time);
         using var cts = new CancellationTokenSource();
 
         Task run = device.RunAsync(channel.Writer, cts.Token);

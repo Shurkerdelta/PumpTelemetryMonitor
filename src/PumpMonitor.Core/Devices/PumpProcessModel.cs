@@ -10,22 +10,22 @@ namespace PumpMonitor.Core.Devices;
 /// curve looks the same regardless of how often it is sampled. Not thread-safe; each
 /// device should own its own instance.
 /// </remarks>
-public sealed class PumpSensorModel : ISensorModel
+public sealed class PumpProcessModel : IPumpProcess
 {
-    private readonly PumpSensorOptions _options;
+    private readonly PumpProcessOptions _options;
     private readonly Random _random;
     private double _pressure;
     private double _temperature;
 
-    public PumpSensorModel(PumpSensorOptions? options = null, Random? random = null)
+    public PumpProcessModel(PumpProcessOptions? options = null, Random? random = null)
     {
-        _options = options ?? new PumpSensorOptions();
+        _options = options ?? new PumpProcessOptions();
         _random = random ?? new Random();
         _pressure = _options.InitialPressure ?? _options.IdlePressure;
         _temperature = _options.InitialTemperature ?? _options.IdleTemperature;
     }
 
-    public SensorSample Next(bool isRunning, TimeSpan elapsed)
+    public ProcessState Next(bool isRunning, TimeSpan elapsed)
     {
         double pressureTarget = isRunning ? _options.RunningPressure : _options.IdlePressure;
         double temperatureTarget = isRunning ? _options.RunningTemperature : _options.IdleTemperature;
@@ -33,10 +33,10 @@ public sealed class PumpSensorModel : ISensorModel
         _pressure = Step(_pressure, pressureTarget, _options.PressureTimeConstant, _options.PressureNoise, elapsed);
         _temperature = Step(_temperature, temperatureTarget, _options.TemperatureTimeConstant, _options.TemperatureNoise, elapsed);
 
-        // Gauge pressure can't go below zero, however noisy the sensor.
+        // Gauge pressure can't go below zero, however noisy the simulation.
         _pressure = Math.Max(0, _pressure);
 
-        return new SensorSample(_pressure, _temperature);
+        return new ProcessState(_pressure, _temperature);
     }
 
     private double Step(double current, double target, TimeSpan timeConstant, double noise, TimeSpan elapsed)

@@ -6,7 +6,7 @@ namespace PumpMonitor.Core.Devices;
 /// <summary>
 /// A simulated pump that periodically emits <see cref="TelemetryReading"/>s.
 /// The device owns timing, sequence numbers and the on/off state; the values themselves
-/// come from an <see cref="ISensorModel"/>, which tests can replace with a stub.
+/// come from an <see cref="IPumpProcess"/>, which tests can replace with a stub.
 /// </summary>
 /// <remarks>
 /// Turning the pump off does not silence the device: its sensors keep reporting while
@@ -15,7 +15,7 @@ namespace PumpMonitor.Core.Devices;
 /// </remarks>
 public sealed class SimulatedDevice
 {
-    private readonly ISensorModel _sensor;
+    private readonly IPumpProcess _process;
     private readonly SimulatedDeviceOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly Random _random;
@@ -25,7 +25,7 @@ public sealed class SimulatedDevice
 
     public SimulatedDevice(
         string deviceId,
-        ISensorModel? sensor = null,
+        IPumpProcess? process = null,
         SimulatedDeviceOptions? options = null,
         TimeProvider? timeProvider = null,
         Random? random = null)
@@ -39,7 +39,7 @@ public sealed class SimulatedDevice
 
         DeviceId = deviceId;
         _random = random ?? new Random();
-        _sensor = sensor ?? new PumpSensorModel(random: _random);
+        _process = process ?? new PumpProcessModel(random: _random);
         _timeProvider = timeProvider ?? TimeProvider.System;
         _isOn = _options.StartOn;
     }
@@ -63,8 +63,8 @@ public sealed class SimulatedDevice
         TimeSpan elapsed = _lastReadingAt is { } last ? now - last : TimeSpan.Zero;
         _lastReadingAt = now;
 
-        SensorSample sample = _sensor.Next(_isOn, elapsed);
-        return new TelemetryReading(DeviceId, now, sample.Pressure, sample.Temperature, ++_sequenceNumber);
+        ProcessState state = _process.Next(_isOn, elapsed);
+        return new TelemetryReading(DeviceId, now, state.Pressure, state.Temperature, ++_sequenceNumber);
     }
 
     /// <summary>

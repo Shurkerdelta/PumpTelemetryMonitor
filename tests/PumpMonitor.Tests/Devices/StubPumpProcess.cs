@@ -6,28 +6,28 @@ namespace PumpMonitor.Tests.Devices;
 /// Returns scripted samples in order, repeating the last one once the script runs out,
 /// and records every call so tests can assert what the device passed in.
 /// </summary>
-public sealed class StubSensorModel : ISensorModel
+public sealed class StubPumpProcess : IPumpProcess
 {
-    private readonly Queue<SensorSample> _script;
-    private SensorSample _last;
+    private readonly Queue<ProcessState> _script;
+    private ProcessState _last;
 
-    public StubSensorModel(params SensorSample[] script)
+    public StubPumpProcess(params ProcessState[] script)
     {
         if (script.Length == 0)
         {
             throw new ArgumentException("Provide at least one sample.", nameof(script));
         }
 
-        _script = new Queue<SensorSample>(script);
+        _script = new Queue<ProcessState>(script);
         _last = script[0];
     }
 
     public List<(bool IsRunning, TimeSpan Elapsed)> Calls { get; } = [];
 
-    public SensorSample Next(bool isRunning, TimeSpan elapsed)
+    public ProcessState Next(bool isRunning, TimeSpan elapsed)
     {
         Calls.Add((isRunning, elapsed));
-        if (_script.TryDequeue(out SensorSample next))
+        if (_script.TryDequeue(out ProcessState next))
         {
             _last = next;
         }

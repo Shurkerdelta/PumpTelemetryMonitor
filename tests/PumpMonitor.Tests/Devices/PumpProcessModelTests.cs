@@ -2,13 +2,13 @@ using PumpMonitor.Core.Devices;
 
 namespace PumpMonitor.Tests.Devices;
 
-public class PumpSensorModelTests
+public class PumpProcessModelTests
 {
     private static readonly TimeSpan Tick = TimeSpan.FromMilliseconds(250);
 
-    private static SensorSample RunFor(PumpSensorModel model, bool isRunning, TimeSpan duration, List<SensorSample>? trace = null)
+    private static ProcessState RunFor(PumpProcessModel model, bool isRunning, TimeSpan duration, List<ProcessState>? trace = null)
     {
-        SensorSample sample = default;
+        ProcessState sample = default;
         for (TimeSpan t = TimeSpan.Zero; t < duration; t += Tick)
         {
             sample = model.Next(isRunning, Tick);
@@ -21,11 +21,11 @@ public class PumpSensorModelTests
     [Fact]
     public void WarmsUpWhenOnAndCoolsDownWhenOff_SettlingNearTargetsDespiteNoise()
     {
-        var options = new PumpSensorOptions();
-        var model = new PumpSensorModel(options, new Random(42));
+        var options = new PumpProcessOptions();
+        var model = new PumpProcessModel(options, new Random(42));
 
-        SensorSample running = RunFor(model, isRunning: true, TimeSpan.FromSeconds(90));
-        SensorSample stopped = RunFor(model, isRunning: false, TimeSpan.FromSeconds(120));
+        ProcessState running = RunFor(model, isRunning: true, TimeSpan.FromSeconds(90));
+        ProcessState stopped = RunFor(model, isRunning: false, TimeSpan.FromSeconds(120));
 
         Assert.InRange(running.Pressure, options.RunningPressure - 10, options.RunningPressure + 10);
         Assert.InRange(running.Temperature, options.RunningTemperature - 3, options.RunningTemperature + 3);
@@ -36,10 +36,10 @@ public class PumpSensorModelTests
     [Fact]
     public void WithoutNoise_FollowsMonotonicCurveAndTemperatureLagsPressure()
     {
-        var options = new PumpSensorOptions { PressureNoise = 0, TemperatureNoise = 0 };
-        var model = new PumpSensorModel(options);
-        var warmUp = new List<SensorSample>();
-        var coolDown = new List<SensorSample>();
+        var options = new PumpProcessOptions { PressureNoise = 0, TemperatureNoise = 0 };
+        var model = new PumpProcessModel(options);
+        var warmUp = new List<ProcessState>();
+        var coolDown = new List<ProcessState>();
 
         RunFor(model, isRunning: true, TimeSpan.FromSeconds(30), warmUp);
         RunFor(model, isRunning: false, TimeSpan.FromSeconds(30), coolDown);
@@ -48,7 +48,7 @@ public class PumpSensorModelTests
         Assert.All(coolDown.Zip(coolDown.Skip(1)), p => Assert.True(p.Second.Pressure < p.First.Pressure && p.Second.Temperature < p.First.Temperature));
 
         // After one pressure time constant (3s) pressure is ~63% of the way there; temperature much less.
-        SensorSample at3s = warmUp[11];
+        ProcessState at3s = warmUp[11];
         double pressureProgress = (at3s.Pressure - options.IdlePressure) / (options.RunningPressure - options.IdlePressure);
         double temperatureProgress = (at3s.Temperature - options.IdleTemperature) / (options.RunningTemperature - options.IdleTemperature);
         Assert.InRange(pressureProgress, 0.6, 0.66);
@@ -58,11 +58,11 @@ public class PumpSensorModelTests
     [Fact]
     public void NoiseMakesRunsDifferButKeepsPressureNonNegative()
     {
-        var trace1 = new List<SensorSample>();
-        var trace2 = new List<SensorSample>();
+        var trace1 = new List<ProcessState>();
+        var trace2 = new List<ProcessState>();
 
-        RunFor(new PumpSensorModel(random: new Random(1)), isRunning: false, TimeSpan.FromSeconds(30), trace1);
-        RunFor(new PumpSensorModel(random: new Random(2)), isRunning: false, TimeSpan.FromSeconds(30), trace2);
+        RunFor(new PumpProcessModel(random: new Random(1)), isRunning: false, TimeSpan.FromSeconds(30), trace1);
+        RunFor(new PumpProcessModel(random: new Random(2)), isRunning: false, TimeSpan.FromSeconds(30), trace2);
 
         Assert.NotEqual(trace1, trace2);
         Assert.All(trace1.Concat(trace2), s => Assert.True(s.Pressure >= 0));
