@@ -2,24 +2,35 @@
 using System.Threading.Channels;
 using PumpMonitor.App;
 using PumpMonitor.Core;
+using PumpMonitor.Core.Alerts;
 using PumpMonitor.Core.Devices;
 using PumpMonitor.Core.Processing;
 using PumpMonitor.Core.Telemetry;
 
 Console.OutputEncoding = Encoding.UTF8;
 
+// Every reading is too noisy for normal use, so they start hidden. Pass --show-readings (or -v) to start
+// with them printed for debugging; the 'readings on|off' command flips this while running.
+var showReadings = new Toggle(args.Any(a => a is "--show-readings" or "-v"));
+string[] unknownArgs = args.Where(a => a is not ("--show-readings" or "-v")).ToArray();
+
 int deviceCount = Random.Shared.Next(Constants.Simulation.MinDeviceCount, Constants.Simulation.MaxDeviceCount + 1);
 SimulatedDevice[] devices = Enumerable.Range(1, deviceCount)
     .Select(i => new SimulatedDevice($"{Constants.Simulation.DeviceIdPrefix}{i}"))
     .ToArray();
-var commands = new DeviceCommandHandler(devices);
 
 // All console output goes through one object so log lines never break up the operator's typing.
 var ui = new ConsoleUi();
 
+var alerts = new AlertMonitor(
+    alert => ui.WriteLine(
+        $"!! ALERT {alert.Timestamp.ToLocalTime():HH:mm:ss.fff}  {alert.DeviceId,-7} {alert.Type}: {alert.Message}"),
+    expectedDeviceIds: devices.Select(d => d.DeviceId));
+var commands = new DeviceCommandHandler(devices, alerts, showReadings);
+
 // All devices write into the pipeline; its single consumer runs the handlers so producers never wait on them.
 await using var pipeline = new TelemetryPipeline(
-    [new ConsoleLogHandler(ui)],
+    [new ConsoleLogHandler(ui, showReadings), alerts],
     (reading, ex) => ui.WriteError($"Handler failed on {reading.DeviceId} #{reading.SequenceNumber}: {ex.Message}"));
 pipeline.Start();
 
@@ -32,16 +43,26 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 Task[] producers = devices.Select(d => RunDeviceAsync(d, pipeline.Writer, ui, shutdown.Token)).ToArray();
+Task silenceWatch = alerts.RunSilenceWatchAsync(Constants.Alerts.SilenceCheckInterval, shutdown.Token);
+
+if (unknownArgs.Length > 0)
+{
+    ui.WriteError($"Ignoring unknown arguments: {string.Join(" ", unknownArgs)}. Supported: --show-readings (-v)");
+}
 
 ui.WriteLine($"Started {deviceCount} devices: {string.Join(", ", devices.Select(d => d.DeviceId))}");
+ui.WriteLine(showReadings.IsOn
+    ? "Printing every reading. Type 'readings off' to hide them."
+    : "Readings are hidden; only alerts are printed. Type 'readings on' (or start with --show-readings) to see them.");
 ui.WriteLine(DeviceCommandHandler.HelpText);
 
 await ReadCommandsAsync(commands, ui, shutdown);
 ui.Close();
 
-// Graceful shutdown: stop producers first, then let the pipeline drain what's queued (bounded by a timeout).
+// Graceful shutdown: stop producers (and the silence watch, so stopped devices aren't reported as silent),
+// then let the pipeline drain what's queued (bounded by a timeout).
 shutdown.Cancel();
-await Task.WhenAll(producers);
+await Task.WhenAll([.. producers, silenceWatch]);
 using (var drainTimeout = new CancellationTokenSource(Constants.Pipeline.DrainTimeout))
 {
     await pipeline.StopAsync(drainTimeout.Token);

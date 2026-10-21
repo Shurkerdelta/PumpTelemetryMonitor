@@ -18,8 +18,11 @@ public static class Constants
         /// <summary>Device ids are this prefix followed by 1, 2, 3...</summary>
         public const string DeviceIdPrefix = "pump-";
 
-        public static readonly TimeSpan MinReadingInterval = TimeSpan.FromMilliseconds(100);
-        public static readonly TimeSpan MaxReadingInterval = TimeSpan.FromMilliseconds(500);
+        public const int MinReadingIntervalInMilliseconds = 100;
+        public const int MaxReadingIntervalInMilliseconds = 500;
+
+        public static readonly TimeSpan MinReadingInterval = TimeSpan.FromMilliseconds(MinReadingIntervalInMilliseconds);
+        public static readonly TimeSpan MaxReadingInterval = TimeSpan.FromMilliseconds(MaxReadingIntervalInMilliseconds);
 
         /// <summary>Whether pumps are running when they are created.</summary>
         public const bool StartOn = true;
@@ -60,6 +63,34 @@ public static class Constants
 
         /// <summary>Standard deviation in °C per √second.</summary>
         public const double TemperatureNoise = 0.2;
+    }
+
+    /// <summary>
+    /// Default alert thresholds. <see cref="PumpMonitor.Core.Alerts.AlertOptions"/> uses these as its defaults;
+    /// they can be overridden per monitor or changed at runtime with the <c>threshold</c> command.
+    /// </summary>
+    public static class Alerts
+    {
+        /// <summary>MPa (~10,000 psi). Above normal treating pressure, well below a 103 MPa pump rating.</summary>
+        public const double PressureThreshold = 69;
+
+        /// <summary>MPa. Pressure must fall this far below the threshold before the alert can fire again.</summary>
+        public const double PressureDeadband = 1;
+
+        /// <summary>°C. Power-end lube oil running hot (normal is around 60–80 °C).</summary>
+        public const double TemperatureThreshold = 90;
+
+        /// <summary>°C. Temperature must fall this far below the threshold before the alert can fire again.</summary>
+        public const double TemperatureDeadband = 2;
+
+        /// <summary>A device is silent once nothing has been heard from it for longer than this.</summary>
+        public const int SilenceTimeoutInMilliseconds = 5000;
+
+        /// <summary>How often to look for silent devices; bounds how late a silence alert can be.</summary>
+        public const int SilenceCheckIntervalInMilliseconds = 500;
+
+        public static readonly TimeSpan SilenceTimeout = TimeSpan.FromMilliseconds(SilenceTimeoutInMilliseconds);
+        public static readonly TimeSpan SilenceCheckInterval = TimeSpan.FromMilliseconds(SilenceCheckIntervalInMilliseconds);
     }
 
     /// <summary>Queueing and shutdown of the processing pipeline.</summary>

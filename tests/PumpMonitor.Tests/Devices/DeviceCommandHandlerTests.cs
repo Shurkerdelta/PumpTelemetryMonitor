@@ -1,3 +1,5 @@
+using PumpMonitor.Core;
+using PumpMonitor.Core.Alerts;
 using PumpMonitor.Core.Devices;
 
 namespace PumpMonitor.Tests.Devices;
@@ -90,5 +92,81 @@ public class DeviceCommandHandlerTests
 
         Assert.Contains("pump-1: ON", status);
         Assert.Contains("pump-3: OFF", status);
+    }
+
+    [Fact]
+    public void Threshold_UpdatesEachAlertThreshold()
+    {
+        var alerts = new AlertMonitor(_ => { });
+        var handler = new DeviceCommandHandler(_devices, alerts);
+
+        handler.Execute("threshold pressure 50.5");
+        handler.Execute("THRESHOLD temperature 80");
+        CommandResult result = handler.Execute("threshold silence 2.5");
+
+        Assert.Equal(
+            (50.5, 80.0, TimeSpan.FromSeconds(2.5)),
+            (alerts.Options.PressureThreshold, alerts.Options.TemperatureThreshold, alerts.Options.SilenceTimeout));
+        Assert.Contains("50.50 MPa", result.Message);
+    }
+
+    [Theory]
+    [InlineData("threshold pressure")]
+    [InlineData("threshold pressure abc")]
+    [InlineData("threshold flow 10")]
+    [InlineData("threshold silence 0")]
+    [InlineData("threshold pressure NaN")]
+    public void Threshold_InvalidInput_ShowsUsageAndLeavesOptionsUnchanged(string command)
+    {
+        var alerts = new AlertMonitor(_ => { });
+        AlertOptions before = alerts.Options;
+
+        CommandResult result = new DeviceCommandHandler(_devices, alerts).Execute(command);
+
+        Assert.StartsWith("Usage:", result.Message);
+        Assert.Same(before, alerts.Options);
+    }
+
+    [Fact]
+    public void Threshold_WithoutArguments_ShowsCurrentValues_OrExplainsWhenAlertsAreOff()
+    {
+        var withAlerts = new DeviceCommandHandler(_devices, new AlertMonitor(_ => { }));
+
+        Assert.Contains("69.00 MPa", withAlerts.Execute("threshold").Message);
+        Assert.Equal("Alerts are not enabled.", CreateHandler().Execute("threshold").Message);
+    }
+
+    [Fact]
+    public void Readings_TurnsOutputOnAndOff_AndReportsState()
+    {
+        var showReadings = new Toggle();
+        var handler = new DeviceCommandHandler(_devices, showReadings: showReadings);
+
+        Assert.Equal("Readings are hidden.", handler.Execute("readings").Message);
+
+        Assert.Equal("Readings are shown.", handler.Execute("READINGS on").Message);
+        Assert.True(showReadings.IsOn);
+
+        Assert.Equal("Readings are hidden.", handler.Execute("readings off").Message);
+        Assert.False(showReadings.IsOn);
+    }
+
+    [Theory]
+    [InlineData("readings maybe")]
+    [InlineData("readings on now")]
+    public void Readings_InvalidInput_ShowsUsageAndLeavesSettingUnchanged(string command)
+    {
+        var showReadings = new Toggle(isOn: true);
+
+        CommandResult result = new DeviceCommandHandler(_devices, showReadings: showReadings).Execute(command);
+
+        Assert.Equal("Usage: readings [on|off]", result.Message);
+        Assert.True(showReadings.IsOn);
+    }
+
+    [Fact]
+    public void Readings_WithoutToggle_ExplainsItIsUnavailable()
+    {
+        Assert.Equal("Reading output can't be toggled.", CreateHandler().Execute("readings on").Message);
     }
 }
