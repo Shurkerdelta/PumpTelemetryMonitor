@@ -222,8 +222,8 @@ public sealed class DeviceCommandHandler
 
     private static string DescribeThresholds(AlertOptions options) =>
         string.Join(Environment.NewLine,
-            $"  pressure:    {options.PressureThreshold:F2} MPa (re-arms below {options.PressureThreshold - options.PressureDeadband:F2})",
-            $"  temperature: {options.TemperatureThreshold:F1} °C (re-arms below {options.TemperatureThreshold - options.TemperatureDeadband:F1})",
+            $"  pressure:    {options.PressureThreshold:F2} MPa",
+            $"  temperature: {options.TemperatureThreshold:F1} °C",
             $"  silence:     {options.SilenceTimeout.TotalSeconds:F1} s");
 
     private string Status() =>

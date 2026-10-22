@@ -14,9 +14,9 @@ namespace PumpMonitor.Core.Alerts;
 /// The two run on different threads and share per-device state under a lock.
 /// </para>
 /// <para>
-/// Each alert fires once when its condition starts, not on every reading. High pressure/temperature
-/// re-arm once the value drops below <c>threshold - deadband</c> (so noise at the threshold doesn't
-/// flap); silence re-arms when the device is heard from again.
+/// High pressure and high temperature alert on every reading above the threshold, so consecutive high
+/// readings each raise an alert. Out-of-order alerts fire per offending reading. Silence alerts once per
+/// silent period (there are no readings to alert on) and re-arms when the device is heard from again.
 /// </para>
 /// <para>
 /// Thresholds come from <see cref="Options"/>, which can be replaced at any time from any thread.
@@ -94,13 +94,13 @@ public sealed class AlertMonitor : ITelemetryHandler
                 state.LastSequence = reading.SequenceNumber;
             }
 
-            if (CrossedThreshold(ref state.PressureHigh, reading.Pressure, options.PressureThreshold, options.PressureDeadband))
+            if (reading.Pressure > options.PressureThreshold)
             {
                 alerts.Add(new Alert(reading.DeviceId, AlertType.HighPressure,
                     $"Pressure {reading.Pressure:F2} MPa exceeds {options.PressureThreshold:F2} MPa", now));
             }
 
-            if (CrossedThreshold(ref state.TemperatureHigh, reading.Temperature, options.TemperatureThreshold, options.TemperatureDeadband))
+            if (reading.Temperature > options.TemperatureThreshold)
             {
                 alerts.Add(new Alert(reading.DeviceId, AlertType.HighTemperature,
                     $"Temperature {reading.Temperature:F1} °C exceeds {options.TemperatureThreshold:F1} °C", now));
@@ -154,25 +154,6 @@ public sealed class AlertMonitor : ITelemetryHandler
         }
     }
 
-    /// <summary>
-    /// Updates a latched high flag and returns true only on the reading that first goes above the threshold.
-    /// </summary>
-    private static bool CrossedThreshold(ref bool isHigh, double value, double threshold, double deadband)
-    {
-        if (!isHigh && value > threshold)
-        {
-            isHigh = true;
-            return true;
-        }
-
-        if (isHigh && value <= threshold - deadband)
-        {
-            isHigh = false;
-        }
-
-        return false;
-    }
-
     private void Raise(List<Alert> alerts)
     {
         foreach (Alert alert in alerts)
@@ -185,8 +166,6 @@ public sealed class AlertMonitor : ITelemetryHandler
     {
         public DateTimeOffset LastSeen = lastSeen;
         public long LastSequence;
-        public bool PressureHigh;
-        public bool TemperatureHigh;
         public bool Silent;
     }
 }

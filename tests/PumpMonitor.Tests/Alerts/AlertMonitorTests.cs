@@ -29,21 +29,31 @@ public class AlertMonitorTests
     private AlertType[] Types() => _alerts.Select(a => a.Type).ToArray();
 
     [Fact]
-    public async Task HighPressure_FiresOncePerExcursion_AndReArmsBelowDeadband()
+    public async Task HighPressure_AlertsOnEveryReadingAboveThreshold()
     {
-        var monitor = CreateMonitor(new AlertOptions { PressureThreshold = 60, PressureDeadband = 2 });
+        var monitor = CreateMonitor(new AlertOptions { PressureThreshold = 60 });
 
         await Feed(monitor,
             Reading(1, pressure: 59),
-            Reading(2, pressure: 61),   // crosses: alert
-            Reading(3, pressure: 65),   // still high: no repeat
-            Reading(4, pressure: 59),   // below threshold but inside deadband: stays latched
-            Reading(5, pressure: 61),   // so no new alert
-            Reading(6, pressure: 57.5), // below 60 - 2: re-armed
-            Reading(7, pressure: 62));  // crosses again: alert
+            Reading(2, pressure: 61), // above: alert
+            Reading(3, pressure: 65), // still above: alerts again
+            Reading(4, pressure: 60), // exactly at the threshold is not above
+            Reading(5, pressure: 62)); // above again: alert
 
-        Assert.Equal([AlertType.HighPressure, AlertType.HighPressure], Types());
-        Assert.Contains("61.00 MPa exceeds 60.00 MPa", _alerts.First().Message);
+        Assert.All(_alerts, a => Assert.Equal(AlertType.HighPressure, a.Type));
+        Assert.Equal(
+            ["61.00 MPa exceeds 60.00 MPa", "65.00 MPa exceeds 60.00 MPa", "62.00 MPa exceeds 60.00 MPa"],
+            _alerts.Select(a => a.Message.Replace("Pressure ", "")));
+    }
+
+    [Fact]
+    public async Task HighTemperature_AlertsOnEveryReadingAboveThreshold()
+    {
+        var monitor = CreateMonitor(new AlertOptions { TemperatureThreshold = 80 });
+
+        await Feed(monitor, Reading(1, temperature: 81), Reading(2, temperature: 85), Reading(3, temperature: 79));
+
+        Assert.Equal([AlertType.HighTemperature, AlertType.HighTemperature], Types());
     }
 
     [Fact]
@@ -86,7 +96,7 @@ public class AlertMonitorTests
         var monitor = CreateMonitor();
 
         Assert.Throws<ArgumentException>(() => monitor.Options = new AlertOptions { SilenceTimeout = TimeSpan.Zero });
-        Assert.Throws<ArgumentException>(() => CreateMonitor(new AlertOptions { PressureDeadband = -1 }));
+        Assert.Throws<ArgumentException>(() => CreateMonitor(new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(-1) }));
     }
 
     [Fact]

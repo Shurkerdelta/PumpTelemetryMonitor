@@ -12,17 +12,11 @@ public sealed record AlertOptions
     /// </summary>
     public double PressureThreshold { get; init; } = 69;
 
-    /// <summary>MPa. Pressure must drop to <c>threshold - deadband</c> before the alert re-arms.</summary>
-    public double PressureDeadband { get; init; } = 1;
-
     /// <summary>
     /// °C. Readings above this raise <see cref="AlertType.HighTemperature"/>: power-end lube oil running hot
     /// (normal is around 60–80 °C).
     /// </summary>
     public double TemperatureThreshold { get; init; } = 90;
-
-    /// <summary>°C. Temperature must drop to <c>threshold - deadband</c> before the alert re-arms.</summary>
-    public double TemperatureDeadband { get; init; } = 2;
 
     /// <summary>Raise <see cref="AlertType.DeviceSilent"/> when a device is quiet for longer than this.</summary>
     public TimeSpan SilenceTimeout { get; init; } = TimeSpan.FromSeconds(5);
@@ -30,11 +24,6 @@ public sealed record AlertOptions
     /// <summary>Throws if any value is out of range.</summary>
     public void Validate()
     {
-        if (PressureDeadband < 0 || TemperatureDeadband < 0)
-        {
-            throw new ArgumentException("Deadbands cannot be negative.");
-        }
-
         if (SilenceTimeout <= TimeSpan.Zero)
         {
             throw new ArgumentException("SilenceTimeout must be positive.");
