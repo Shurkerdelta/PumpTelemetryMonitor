@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using PumpMonitor.Core.Alerts;
 
@@ -14,20 +15,21 @@ public sealed record CommandResult(string Message, bool ExitRequested = false);
 /// </summary>
 /// <remarks>
 /// Commands (case-insensitive): <c>on [id...]</c>, <c>off [id...]</c>, <c>status</c>,
-/// <c>threshold [pressure|temperature|silence value]</c>, <c>readings [on|off]</c>, <c>help</c>,
-/// <c>quit</c>/<c>exit</c>. Omitting the ids applies on/off to every device.
+/// <c>threshold [pressure|temperature|silence value]</c>, <c>readings [on|off]</c>,
+/// <c>fault spike|overheat|silence|reorder [id...]</c>, <c>help</c>,
+/// <c>quit</c>/<c>exit</c>. Omitting the ids applies on/off/fault to every device.
 /// </remarks>
 public sealed class DeviceCommandHandler
 {
     public const string HelpText =
         "Commands: on [id...] | off [id...] | status | threshold [pressure|temperature|silence <value>] | " +
-        "readings [on|off] | help | quit   (omit ids to apply to all devices)";
+        "readings [on|off] | fault <spike|overheat|silence|reorder> [id...] | help | quit   (omit ids to apply to all devices)";
 
     private readonly Dictionary<string, SimulatedDevice> _devices = new(StringComparer.OrdinalIgnoreCase);
     private readonly AlertMonitor? _alerts;
     private readonly Toggle? _showReadings;
 
-    /// <param name="devices">Devices that on/off/status act on.</param>
+    /// <param name="devices">Devices that on/off/status/fault act on.</param>
     /// <param name="alerts">Monitor whose thresholds the <c>threshold</c> command shows and adjusts, if any.</param>
     /// <param name="showReadings">Setting the <c>readings</c> command flips, if reading output can be toggled.</param>
     public DeviceCommandHandler(IEnumerable<SimulatedDevice> devices, AlertMonitor? alerts = null, Toggle? showReadings = null)
@@ -64,6 +66,7 @@ public sealed class DeviceCommandHandler
             "status" => new CommandResult(Status()),
             "threshold" => Threshold(parts[1..]),
             "readings" => Readings(parts[1..]),
+            "fault" => Fault(parts[1..]),
             "help" => new CommandResult(HelpText),
             "quit" or "exit" => new CommandResult("Shutting down...", ExitRequested: true),
             _ => new CommandResult($"Unknown command '{parts[0]}'. {HelpText}"),
@@ -72,18 +75,10 @@ public sealed class DeviceCommandHandler
 
     private CommandResult Switch(string[] deviceIds, bool on)
     {
-        // Resolve every id before switching anything, so a typo doesn't leave a partial change.
-        string[] unknown = deviceIds.Where(id => !_devices.ContainsKey(id)).ToArray();
-        if (unknown.Length > 0)
+        if (!TryResolve(deviceIds, out SimulatedDevice[] targets, out CommandResult? error))
         {
-            string names = string.Join(", ", unknown.Select(id => $"'{id}'"));
-            return new CommandResult(
-                $"Unknown device{(unknown.Length > 1 ? "s" : "")} {names}. Known devices: {string.Join(", ", _devices.Keys)}");
+            return error;
         }
-
-        SimulatedDevice[] targets = deviceIds.Length == 0
-            ? _devices.Values.ToArray()
-            : deviceIds.Select(id => _devices[id]).Distinct().ToArray();
 
         foreach (SimulatedDevice target in targets)
         {
@@ -97,9 +92,68 @@ public sealed class DeviceCommandHandler
             }
         }
 
-        string affected = deviceIds.Length == 0 ? "all devices" : string.Join(", ", targets.Select(d => d.DeviceId));
-        return new CommandResult($"Turned {(on ? "on" : "off")}: {affected}");
+        return new CommandResult($"Turned {(on ? "on" : "off")}: {Describe(deviceIds, targets)}");
     }
+
+    private CommandResult Fault(string[] args)
+    {
+        const string usage = "Usage: fault <spike|overheat|silence|reorder> [id...]";
+        DeviceFault? fault = args.Length == 0 ? null : args[0].ToLowerInvariant() switch
+        {
+            "spike" => DeviceFault.PressureSpike,
+            "overheat" => DeviceFault.Overheat,
+            "silence" => DeviceFault.Silence,
+            "reorder" => DeviceFault.Reorder,
+            _ => null,
+        };
+
+        if (fault is null)
+        {
+            return new CommandResult(usage);
+        }
+
+        string[] deviceIds = args[1..];
+        if (!TryResolve(deviceIds, out SimulatedDevice[] targets, out CommandResult? error))
+        {
+            return error;
+        }
+
+        foreach (SimulatedDevice target in targets)
+        {
+            target.InjectFault(fault.Value);
+        }
+
+        return new CommandResult($"Injected {args[0].ToLowerInvariant()}: {Describe(deviceIds, targets)}");
+    }
+
+    /// <summary>
+    /// Maps ids to devices (all devices when none are given). Resolves every id before anything is applied,
+    /// so a typo doesn't leave a partial change.
+    /// </summary>
+    private bool TryResolve(
+        string[] deviceIds,
+        out SimulatedDevice[] targets,
+        [NotNullWhen(false)] out CommandResult? error)
+    {
+        string[] unknown = deviceIds.Where(id => !_devices.ContainsKey(id)).ToArray();
+        if (unknown.Length > 0)
+        {
+            string names = string.Join(", ", unknown.Select(id => $"'{id}'"));
+            targets = [];
+            error = new CommandResult(
+                $"Unknown device{(unknown.Length > 1 ? "s" : "")} {names}. Known devices: {string.Join(", ", _devices.Keys)}");
+            return false;
+        }
+
+        targets = deviceIds.Length == 0
+            ? _devices.Values.ToArray()
+            : deviceIds.Select(id => _devices[id]).Distinct().ToArray();
+        error = null;
+        return true;
+    }
+
+    private static string Describe(string[] deviceIds, SimulatedDevice[] targets) =>
+        deviceIds.Length == 0 ? "all devices" : string.Join(", ", targets.Select(d => d.DeviceId));
 
     private CommandResult Threshold(string[] args)
     {

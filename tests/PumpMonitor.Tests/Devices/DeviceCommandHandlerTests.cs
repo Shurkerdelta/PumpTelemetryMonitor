@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Time.Testing;
 using PumpMonitor.Core;
 using PumpMonitor.Core.Alerts;
 using PumpMonitor.Core.Devices;
@@ -163,6 +164,42 @@ public class DeviceCommandHandlerTests
 
         Assert.Equal("Usage: readings [on|off]", result.Message);
         Assert.True(showReadings.IsOn);
+    }
+
+    [Fact]
+    public void Fault_InjectsIntoListedDevicesOnly()
+    {
+        var time = new FakeTimeProvider();
+        SimulatedDevice CreateStubbed(string id) =>
+            new(id, new StubPumpProcess(new ProcessState(55, 70)), timeProvider: time);
+        SimulatedDevice[] devices = [CreateStubbed("pump-1"), CreateStubbed("pump-2")];
+        var handler = new DeviceCommandHandler(devices);
+
+        CommandResult result = handler.Execute("FAULT spike pump-2");
+
+        Assert.Equal("Injected spike: pump-2", result.Message);
+        Assert.Equal(55, devices[0].TakeReading().Pressure);
+        Assert.Equal(55 + new SimulatedDeviceOptions().SpikePressure, devices[1].TakeReading().Pressure);
+    }
+
+    [Fact]
+    public void Fault_WithoutIds_AppliesToAllDevices()
+    {
+        Assert.Equal("Injected reorder: all devices", CreateHandler().Execute("fault reorder").Message);
+    }
+
+    [Theory]
+    [InlineData("fault")]
+    [InlineData("fault meltdown pump-1")]
+    public void Fault_UnknownType_ShowsUsage(string command)
+    {
+        Assert.StartsWith("Usage: fault", CreateHandler().Execute(command).Message);
+    }
+
+    [Fact]
+    public void Fault_UnknownDevice_ListsKnownIds()
+    {
+        Assert.StartsWith("Unknown device 'pump-9'", CreateHandler().Execute("fault silence pump-1 pump-9").Message);
     }
 
     [Fact]
