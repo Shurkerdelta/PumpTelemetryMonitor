@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using PumpMonitor.Core.Alerts;
 using PumpMonitor.Core.Telemetry;
 
 namespace PumpMonitor.Core.Devices;
@@ -26,7 +27,9 @@ public sealed class SimulatedDevice
     // Fault state is set from the command thread and read by the run loop, so it's guarded by a lock.
     private readonly Lock _faultGate = new();
     private DateTimeOffset _spikeUntil = DateTimeOffset.MinValue;
+    private double _spikeThreshold;
     private DateTimeOffset _overheatUntil = DateTimeOffset.MinValue;
+    private double _overheatThreshold;
     private DateTimeOffset _silentUntil = DateTimeOffset.MinValue;
     private bool _reorderPending;
 
@@ -44,9 +47,13 @@ public sealed class SimulatedDevice
             throw new ArgumentException("Intervals must be positive and MinInterval <= MaxInterval.", nameof(options));
         }
 
-        if (_options.FaultDuration <= TimeSpan.Zero || _options.SilenceDuration <= TimeSpan.Zero)
+        // Margins must be positive or a fault could land exactly on a threshold, which doesn't alert.
+        if (_options.FaultDuration <= TimeSpan.Zero
+            || _options.FaultPressureMargin <= 0
+            || _options.FaultTemperatureMargin <= 0
+            || _options.FaultSilenceMargin <= TimeSpan.Zero)
         {
-            throw new ArgumentException("Fault durations must be positive.", nameof(options));
+            throw new ArgumentException("Fault duration and margins must be positive.", nameof(options));
         }
 
         DeviceId = deviceId;
@@ -65,12 +72,18 @@ public sealed class SimulatedDevice
     public void TurnOff() => _isOn = false;
 
     /// <summary>
-    /// Starts abnormal behaviour so alerts can be exercised while running. Safe to call from any thread.
-    /// Spikes and overheats sit on top of the pump's normal curve, which carries on underneath, so values
-    /// return to normal when the fault ends. Injecting a fault that is already active restarts its timer.
+    /// Starts abnormal behaviour that is guaranteed to trip the matching alert under <paramref name="limits"/>
+    /// (the alert monitor's current options; defaults if omitted). Safe to call from any thread.
     /// </summary>
-    public void InjectFault(DeviceFault fault)
+    /// <remarks>
+    /// Spikes and overheats report <c>max(actual, threshold) + margin</c>, so the value is always strictly above
+    /// the threshold however it is set, while the pump's normal curve carries on underneath and readings return
+    /// to normal when the fault ends. Silence lasts the silence timeout plus a margin that covers the monitor's
+    /// check interval. Injecting a fault that is already active restarts it with the new limits.
+    /// </remarks>
+    public void InjectFault(DeviceFault fault, AlertOptions? limits = null)
     {
+        limits ??= new AlertOptions();
         DateTimeOffset now = _timeProvider.GetUtcNow();
         lock (_faultGate)
         {
@@ -78,12 +91,14 @@ public sealed class SimulatedDevice
             {
                 case DeviceFault.PressureSpike:
                     _spikeUntil = now + _options.FaultDuration;
+                    _spikeThreshold = limits.PressureThreshold;
                     break;
                 case DeviceFault.Overheat:
                     _overheatUntil = now + _options.FaultDuration;
+                    _overheatThreshold = limits.TemperatureThreshold;
                     break;
                 case DeviceFault.Silence:
-                    _silentUntil = now + _options.SilenceDuration;
+                    _silentUntil = now + limits.SilenceTimeout + _options.FaultSilenceMargin;
                     break;
                 case DeviceFault.Reorder:
                     _reorderPending = true;
@@ -112,12 +127,12 @@ public sealed class SimulatedDevice
         {
             if (now < _spikeUntil)
             {
-                pressure += _options.SpikePressure;
+                pressure = Math.Max(pressure, _spikeThreshold) + _options.FaultPressureMargin;
             }
 
             if (now < _overheatUntil)
             {
-                temperature += _options.OverheatTemperature;
+                temperature = Math.Max(temperature, _overheatThreshold) + _options.FaultTemperatureMargin;
             }
         }
 

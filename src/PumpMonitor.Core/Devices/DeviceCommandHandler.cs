@@ -118,9 +118,11 @@ public sealed class DeviceCommandHandler
             return error;
         }
 
+        // Aim at the monitor's current thresholds (including any changed with 'threshold') so the fault always alerts.
+        AlertOptions limits = _alerts?.Options ?? new AlertOptions();
         foreach (SimulatedDevice target in targets)
         {
-            target.InjectFault(fault.Value);
+            target.InjectFault(fault.Value, limits);
         }
 
         return new CommandResult($"Injected {args[0].ToLowerInvariant()}: {Describe(deviceIds, targets)}");

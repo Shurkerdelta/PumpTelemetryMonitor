@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using Microsoft.Extensions.Time.Testing;
+using PumpMonitor.Core.Alerts;
 using PumpMonitor.Core.Devices;
 using PumpMonitor.Core.Telemetry;
 
@@ -13,10 +14,10 @@ public class SimulatedDeviceFaultTests
     {
         MinInterval = Interval,
         MaxInterval = Interval,
-        SpikePressure = 25,
-        OverheatTemperature = 30,
+        FaultPressureMargin = 5,
+        FaultTemperatureMargin = 5,
+        FaultSilenceMargin = TimeSpan.FromSeconds(1),
         FaultDuration = TimeSpan.FromSeconds(1),
-        SilenceDuration = TimeSpan.FromSeconds(2),
     };
 
     private readonly FakeTimeProvider _time = new();
@@ -48,42 +49,57 @@ public class SimulatedDeviceFaultTests
         return readings;
     }
 
+    [Theory]
+    [InlineData(69, 74)] // threshold above actual (55): reads threshold + margin
+    [InlineData(20, 60)] // threshold below actual: reads actual + margin, still above both
+    public void PressureSpike_ReadsAboveThresholdUntilFaultDurationEnds(double threshold, double expected)
+    {
+        SimulatedDevice device = CreateDevice();
+
+        device.InjectFault(DeviceFault.PressureSpike, new AlertOptions { PressureThreshold = threshold });
+        TelemetryReading during = device.TakeReading();
+        _time.Advance(TimeSpan.FromSeconds(1));
+        TelemetryReading after = device.TakeReading();
+
+        Assert.Equal((expected, 70), (during.Pressure, during.Temperature));
+        Assert.Equal((55, 70), (after.Pressure, after.Temperature));
+    }
+
+    [Theory]
+    [InlineData(90, 95)]
+    [InlineData(40, 75)]
+    public void Overheat_ReadsAboveThresholdUntilFaultDurationEnds(double threshold, double expected)
+    {
+        SimulatedDevice device = CreateDevice();
+
+        device.InjectFault(DeviceFault.Overheat, new AlertOptions { TemperatureThreshold = threshold });
+        TelemetryReading during = device.TakeReading();
+        _time.Advance(TimeSpan.FromSeconds(1));
+        TelemetryReading after = device.TakeReading();
+
+        Assert.Equal((55, expected), (during.Pressure, during.Temperature));
+        Assert.Equal((55, 70), (after.Pressure, after.Temperature));
+    }
+
     [Fact]
-    public void PressureSpike_AddsToPressureUntilFaultDurationEnds()
+    public void InjectFault_WithoutLimits_UsesDefaultAlertOptions()
     {
         SimulatedDevice device = CreateDevice();
 
         device.InjectFault(DeviceFault.PressureSpike);
-        TelemetryReading during = device.TakeReading();
-        _time.Advance(TimeSpan.FromSeconds(1));
-        TelemetryReading after = device.TakeReading();
 
-        Assert.Equal((80, 70), (during.Pressure, during.Temperature));
-        Assert.Equal((55, 70), (after.Pressure, after.Temperature));
+        Assert.Equal(new AlertOptions().PressureThreshold + 5, device.TakeReading().Pressure);
     }
 
     [Fact]
-    public void Overheat_AddsToTemperatureUntilFaultDurationEnds()
-    {
-        SimulatedDevice device = CreateDevice();
-
-        device.InjectFault(DeviceFault.Overheat);
-        TelemetryReading during = device.TakeReading();
-        _time.Advance(TimeSpan.FromSeconds(1));
-        TelemetryReading after = device.TakeReading();
-
-        Assert.Equal((55, 100), (during.Pressure, during.Temperature));
-        Assert.Equal((55, 70), (after.Pressure, after.Temperature));
-    }
-
-    [Fact]
-    public async Task Silence_SendsNothingUntilSilenceDurationEnds_ThenResumesWithoutSkippingSequence()
+    public async Task Silence_LastsSilenceTimeoutPlusMargin_ThenResumesWithoutSkippingSequence()
     {
         SimulatedDevice device = CreateDevice();
         var channel = Channel.CreateUnbounded<TelemetryReading>();
         using var cts = new CancellationTokenSource();
 
-        device.InjectFault(DeviceFault.Silence);
+        // 1s timeout + 1s margin = silent for 2s.
+        device.InjectFault(DeviceFault.Silence, new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(1) });
         Task run = device.RunAsync(channel.Writer, cts.Token);
         List<TelemetryReading> readings = await CollectAsync(channel.Reader, 2);
         cts.Cancel();
@@ -109,10 +125,17 @@ public class SimulatedDeviceFaultTests
         Assert.Equal([2L, 1, 3, 4], readings.Select(r => r.SequenceNumber));
     }
 
-    [Fact]
-    public void Constructor_RejectsNonPositiveFaultDurations()
+    [Theory]
+    [InlineData(0, 5)]
+    [InlineData(5, 0)]
+    public void Constructor_RejectsNonPositiveMargins(double pressureMargin, double temperatureMargin)
     {
-        Assert.Throws<ArgumentException>(() =>
-            new SimulatedDevice("pump-1", options: new SimulatedDeviceOptions { SilenceDuration = TimeSpan.Zero }));
+        var options = new SimulatedDeviceOptions
+        {
+            FaultPressureMargin = pressureMargin,
+            FaultTemperatureMargin = temperatureMargin,
+        };
+
+        Assert.Throws<ArgumentException>(() => new SimulatedDevice("pump-1", options: options));
     }
 }

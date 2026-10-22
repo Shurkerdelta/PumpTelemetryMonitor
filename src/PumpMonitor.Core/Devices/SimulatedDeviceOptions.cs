@@ -13,20 +13,23 @@ public sealed record SimulatedDeviceOptions
     public bool StartOn { get; init; } = true;
 
     /// <summary>
-    /// MPa added during a <see cref="DeviceFault.PressureSpike"/>. Lifts a running pump (~55 MPa) to ~80 MPa,
-    /// past the default 69 MPa alert threshold; trips it once pressure is above 44 MPa (~8 s after start).
+    /// MPa a <see cref="DeviceFault.PressureSpike"/> reports above the alert threshold (or above the actual
+    /// pressure, if that is already higher). Must be positive so the spike is strictly over the threshold.
     /// </summary>
-    public double SpikePressure { get; init; } = 25;
+    public double FaultPressureMargin { get; init; } = 5;
 
     /// <summary>
-    /// °C added during a <see cref="DeviceFault.Overheat"/>. Large enough to pass the default 90 °C alert once the
-    /// oil is above 40 °C (~13 s after start); a smaller step would need the slow warm-up to nearly finish.
+    /// °C an <see cref="DeviceFault.Overheat"/> reports above the alert threshold (or above the actual
+    /// temperature, if that is already higher). Must be positive so the overheat is strictly over the threshold.
     /// </summary>
-    public double OverheatTemperature { get; init; } = 50;
+    public double FaultTemperatureMargin { get; init; } = 5;
+
+    /// <summary>
+    /// How much longer than the alert's silence timeout a <see cref="DeviceFault.Silence"/> lasts. Must exceed
+    /// the monitor's silence check interval (0.5 s in the app) so the silence is noticed before readings resume.
+    /// </summary>
+    public TimeSpan FaultSilenceMargin { get; init; } = TimeSpan.FromSeconds(2);
 
     /// <summary>How long a pressure spike or overheat lasts.</summary>
     public TimeSpan FaultDuration { get; init; } = TimeSpan.FromSeconds(3);
-
-    /// <summary>How long a <see cref="DeviceFault.Silence"/> lasts; longer than the default 5 s silence alert.</summary>
-    public TimeSpan SilenceDuration { get; init; } = TimeSpan.FromSeconds(8);
 }

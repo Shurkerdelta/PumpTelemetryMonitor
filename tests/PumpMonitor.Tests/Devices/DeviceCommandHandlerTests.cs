@@ -179,7 +179,22 @@ public class DeviceCommandHandlerTests
 
         Assert.Equal("Injected spike: pump-2", result.Message);
         Assert.Equal(55, devices[0].TakeReading().Pressure);
-        Assert.Equal(55 + new SimulatedDeviceOptions().SpikePressure, devices[1].TakeReading().Pressure);
+        Assert.Equal(
+            new AlertOptions().PressureThreshold + new SimulatedDeviceOptions().FaultPressureMargin,
+            devices[1].TakeReading().Pressure);
+    }
+
+    [Fact]
+    public void Fault_AimsAtTheMonitorsCurrentThresholds()
+    {
+        var device = new SimulatedDevice("pump-1", new StubPumpProcess(new ProcessState(55, 70)), timeProvider: new FakeTimeProvider());
+        var alerts = new AlertMonitor(_ => { });
+        var handler = new DeviceCommandHandler([device], alerts);
+
+        handler.Execute("threshold temperature 150");
+        handler.Execute("fault overheat");
+
+        Assert.Equal(150 + new SimulatedDeviceOptions().FaultTemperatureMargin, device.TakeReading().Temperature);
     }
 
     [Fact]

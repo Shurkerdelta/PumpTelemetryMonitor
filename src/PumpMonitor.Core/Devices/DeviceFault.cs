@@ -2,17 +2,18 @@ namespace PumpMonitor.Core.Devices;
 
 /// <summary>
 /// Abnormal behaviour an operator can inject into a <see cref="SimulatedDevice"/> to exercise alerting.
-/// Sizes and durations come from <see cref="SimulatedDeviceOptions"/>.
+/// Each fault is sized from the alert settings passed to <see cref="SimulatedDevice.InjectFault"/>, so it is
+/// guaranteed to trip the matching alert; margins and durations come from <see cref="SimulatedDeviceOptions"/>.
 /// </summary>
 public enum DeviceFault
 {
-    /// <summary>Pressure jumps by <see cref="SimulatedDeviceOptions.SpikePressure"/> for <see cref="SimulatedDeviceOptions.FaultDuration"/>.</summary>
+    /// <summary>Pressure reads above the pressure alert threshold for <see cref="SimulatedDeviceOptions.FaultDuration"/>.</summary>
     PressureSpike,
 
-    /// <summary>Temperature rises by <see cref="SimulatedDeviceOptions.OverheatTemperature"/> for <see cref="SimulatedDeviceOptions.FaultDuration"/>.</summary>
+    /// <summary>Temperature reads above the temperature alert threshold for <see cref="SimulatedDeviceOptions.FaultDuration"/>.</summary>
     Overheat,
 
-    /// <summary>The device sends nothing for <see cref="SimulatedDeviceOptions.SilenceDuration"/>, as if it went offline.</summary>
+    /// <summary>The device sends nothing for longer than the silence alert timeout, as if it went offline.</summary>
     Silence,
 
     /// <summary>The next two readings are delivered in swapped order, as a flaky network might.</summary>
