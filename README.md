@@ -1,7 +1,8 @@
 # Pump Telemetry Monitor
 
 A .NET 10 console app that simulates a small fleet of frac pumps, streams their telemetry through a processing
-pipeline, and raises alerts. This document explains how the **simulated telemetry** part is implemented.
+pipeline, and raises alerts. This document explains how the **simulated telemetry** and **alert detection**
+parts are implemented.
 
 ## Requirement
 
@@ -123,6 +124,100 @@ Faults are sized from the current alert thresholds, so each one is guaranteed to
 reorder deliberately break the normal cadence and order. Without them, every device reports in order every
 100–500 ms.
 
+## Alert detection
+
+### Requirement
+
+Alerts are generated and printed to the console when pressure is above a threshold, when a sequence number arrives
+out of order, and when a device is silent for more than 5 seconds.
+
+### Where the code lives
+
+| Piece | File | Role |
+|---|---|---|
+| Alert | [Alert.cs](src/PumpMonitor.Core/Alerts/Alert.cs) | Record of device, type, message and detection time |
+| Thresholds | [AlertOptions.cs](src/PumpMonitor.Core/Alerts/AlertOptions.cs) | Pressure 69 MPa, temperature 90 °C, silence 5 s; validated at startup |
+| Reading checks | [AlertMonitor.cs](src/PumpMonitor.Core/Alerts/AlertMonitor.cs) | Pipeline handler: pressure, temperature and sequence checks |
+| Silence | [SilenceMonitor.cs](src/PumpMonitor.Core/Alerts/SilenceMonitor.cs) | Timer-driven check for devices that stopped reporting |
+| Delivery | [AlertDelivery.cs](src/PumpMonitor.Core/Alerts/AlertDelivery.cs) | Delivers every alert even if one callback call fails |
+| Printing | [Program.cs](src/PumpMonitor.App/Program.cs) | One callback prints every alert to the console |
+
+### Two monitors
+
+Alerts that depend on a reading's contents can be checked when the reading arrives. Silence can't: a silent
+device sends nothing to react to. So detection is split in two:
+
+```
+devices ─► SilenceMonitor.Track ─► pipeline ─► AlertMonitor ─┐
+                │                                            ├─► printAlert ─► console
+                └─ last heard from ◄── timer (every 0.5 s) ──┘
+```
+
+- **`AlertMonitor`** is an `ITelemetryHandler` in the pipeline. It runs on the single consumer, so it keeps its
+  per-device state without locks.
+- **`SilenceMonitor`** wraps the pipeline's writer. A device counts as heard from when its reading is *queued*,
+  not when it is processed, so a backed-up consumer (for example a console paused by a text selection) isn't
+  mistaken for silent devices. `RunAsync` checks every device on a 500 ms timer. Device threads and the timer
+  share the state under a lock.
+
+### High pressure
+
+Every reading with `Pressure > PressureThreshold` (69 MPa, about 10,000 psi) raises `HighPressure`, so a
+sustained spike alerts on each reading, not just once. A reading exactly at the threshold doesn't alert.
+Temperature works the same way against 90 °C. `AlertOptions.Validate` rejects NaN and infinite thresholds,
+because no reading is ever above NaN and that alert would silently switch off.
+
+### Out-of-order sequence numbers
+
+`AlertMonitor` remembers the highest sequence number seen from each device. A reading whose number is at or
+below it raises `OutOfOrderSequence` ("Sequence #10 arrived after #11"), which also catches duplicates. A late
+reading doesn't lower the high-water mark, so the readings after it aren't flagged as well. Gaps are not alerts,
+because the pipeline may drop readings when it falls behind. Each device is tracked separately.
+
+### Device silent for more than 5 seconds
+
+Each check raises `DeviceSilent` for any device quiet for longer than `SilenceTimeout` (5 s). Because checks run
+every 500 ms, the alert fires 5–5.5 s after the last reading.
+
+- **Once per silence:** a device is reported once, then re-armed when it is heard from again.
+- **Never reported at all:** every device is registered at startup, so one that never sends a reading is still
+  flagged.
+- **Steady clock:** quiet time is measured with `TimeProvider.GetTimestamp()`, not the wall clock. A system clock
+  change (an NTP step or a manual adjustment) would otherwise report every device silent at once when it jumps
+  forward, or hide a real silence when it jumps back.
+- **Shutdown:** the silence watch stops with the devices, so stopped devices aren't reported as silent.
+
+### Printing and failures
+
+Both monitors call the same `printAlert` callback, which writes a line through `ConsoleUi` above the input
+prompt:
+
+```
+!! ALERT 20:10:42.274  pump-1  HighPressure: Pressure 74.00 MPa exceeds 69.00 MPa
+!! ALERT 20:10:43.623  pump-2  OutOfOrderSequence: Sequence #10 arrived after #11
+!! ALERT 20:10:49.311  pump-3  DeviceSilent: No readings for 5.1s (limit 5.0s)
+```
+
+Alerts are printed even when readings are hidden. A single reading can raise several alerts (for example out of
+order *and* over pressure). `AlertDelivery` hands over every one of them even if the callback throws for one,
+then reports the failures together, so a failed console write can't lose the alerts behind it. A failed silence
+check is reported and the timer keeps running.
+
+Known trade-off: the pipeline drops its oldest queued readings when it falls far behind, and a dropped reading is
+never checked. With a 100-reading queue this needs a stall of 6–10 s.
+
+### Trying it
+
+Inject one fault per alert type while the app runs:
+
+```
+fault spike pump-1
+fault reorder pump-2
+fault silence pump-3
+```
+
+`status` shows the thresholds in use.
+
 ## Testability
 
 - **Fake clock:** every time-dependent class accepts a `TimeProvider`, so tests use `FakeTimeProvider` and run
@@ -138,6 +233,15 @@ The relevant tests are in [tests/PumpMonitor.Tests/Devices](tests/PumpMonitor.Te
 - that delivery time comes out of the wait
 - contiguous, ordered sequence numbers from concurrent devices sharing a channel
 - the 3–5 device count and the `pump-n` naming
+
+The alert tests are in [tests/PumpMonitor.Tests/Alerts](tests/PumpMonitor.Tests/Alerts). They cover:
+
+- alerts on every reading above a threshold, and none exactly at it
+- out-of-order and duplicate sequence numbers, per device, with gaps allowed
+- silence after more than 5 s, once per silence, for devices that never report, and with a stalled queue
+- system clock steps forward and back that don't change measured silence
+- a failing alert callback that doesn't lose the other alerts
+- every injected fault raising its matching alert
 
 ```bash
 dotnet test
