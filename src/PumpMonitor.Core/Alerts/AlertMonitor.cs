@@ -22,6 +22,9 @@ public sealed class AlertMonitor : ITelemetryHandler
     private readonly TimeProvider _timeProvider;
     private readonly Dictionary<string, long> _lastSequence = [];
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AlertMonitor"/> class.
+    /// </summary>
     /// <param name="onAlert">Receives each alert, on the thread calling <see cref="HandleAsync"/>.</param>
     /// <param name="options">Thresholds; defaults to a new <see cref="AlertOptions"/>.</param>
     /// <param name="timeProvider">Clock for alert timestamps; tests pass a fake.</param>

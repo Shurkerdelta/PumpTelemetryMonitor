@@ -11,7 +11,11 @@ public class TelemetryPipelineTests : IDisposable
     // recorded here and checked after each test instead of failing inside the callback.
     private readonly List<string> _unexpectedErrors = [];
 
-    public void Dispose() => Assert.Empty(_unexpectedErrors);
+    public void Dispose()
+    {
+        Assert.Empty(_unexpectedErrors);
+        GC.SuppressFinalize(this);
+    }
 
     private static TelemetryReading Reading(string deviceId, long sequence) =>
         new(deviceId, DateTimeOffset.UnixEpoch, 100, 50, sequence);
@@ -76,13 +80,13 @@ public class TelemetryPipelineTests : IDisposable
         pipeline.Start();
 
         const int perDevice = 500;
-        Task[] producers = Enumerable.Range(1, 4).Select(d => Task.Run(async () =>
+        Task[] producers = [.. Enumerable.Range(1, 4).Select(d => Task.Run(async () =>
         {
             for (long seq = 1; seq <= perDevice; seq++)
             {
                 await pipeline.Writer.WriteAsync(Reading($"pump-{d}", seq));
             }
-        })).ToArray();
+        }))];
         await Task.WhenAll(producers).WaitAsync(Timeout);
         await pipeline.StopAsync().WaitAsync(Timeout);
 

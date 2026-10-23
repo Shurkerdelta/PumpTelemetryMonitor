@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Threading.Channels;
 using PumpMonitor.App;
 using PumpMonitor.Core;
@@ -20,12 +20,11 @@ TimeSpan drainTimeout = TimeSpan.FromSeconds(5);                // how long shut
 // Every reading is too noisy for normal use, so they start hidden. Pass --show-readings (or -v) to start
 // with them printed for debugging; the 'readings on|off' command flips this while running.
 var showReadings = new Toggle(args.Any(a => a is "--show-readings" or "-v"));
-string[] unknownArgs = args.Where(a => a is not ("--show-readings" or "-v")).ToArray();
+string[] unknownArgs = [.. args.Where(a => a is not ("--show-readings" or "-v"))];
 
 int deviceCount = Random.Shared.Next(MinDeviceCount, MaxDeviceCount + 1);
-SimulatedDevice[] devices = Enumerable.Range(1, deviceCount)
-    .Select(i => new SimulatedDevice($"{DeviceIdPrefix}{i}"))
-    .ToArray();
+SimulatedDevice[] devices = [.. Enumerable.Range(1, deviceCount)
+    .Select(i => new SimulatedDevice($"{DeviceIdPrefix}{i}"))];
 
 // All console output goes through one object so log lines never break up the operator's typing.
 var ui = new ConsoleUi();
@@ -57,7 +56,7 @@ Console.CancelKeyPress += (_, e) =>
 
 // Readings count as heard from when they're queued, so a backed-up pipeline isn't mistaken for silent devices.
 ChannelWriter<TelemetryReading> writer = silence.Track(pipeline.Writer);
-Task[] producers = devices.Select(d => RunDeviceAsync(d, writer, ui, shutdown.Token)).ToArray();
+Task[] producers = [.. devices.Select(d => RunDeviceAsync(d, writer, ui, shutdown.Token))];
 Task silenceWatch = silence.RunAsync(
     silenceCheckInterval, ex => ui.WriteError($"Silence check failed: {ex.Message}"), shutdown.Token);
 

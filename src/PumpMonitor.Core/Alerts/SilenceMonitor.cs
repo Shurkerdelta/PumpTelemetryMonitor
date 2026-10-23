@@ -26,6 +26,9 @@ public sealed class SilenceMonitor
     private readonly Lock _gate = new();
     private readonly Dictionary<string, DeviceState> _devices = [];
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="SilenceMonitor"/> class.
+    /// </summary>
     /// <param name="onAlert">Receives each alert. Called outside the internal lock, on the thread running the check.</param>
     /// <param name="options">Supplies the silence timeout; defaults to a new <see cref="AlertOptions"/>.</param>
     /// <param name="expectedDeviceIds">

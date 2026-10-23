@@ -88,12 +88,11 @@ public class SimulatedDeviceTests
     {
         var time = new FakeTimeProvider();
         var channel = Channel.CreateUnbounded<TelemetryReading>();
-        SimulatedDevice[] devices = Enumerable.Range(1, 4)
-            .Select(i => new SimulatedDevice($"pump-{i}", timeProvider: time, random: new Random(i)))
-            .ToArray();
+        SimulatedDevice[] devices = [.. Enumerable.Range(1, 4)
+            .Select(i => new SimulatedDevice($"pump-{i}", timeProvider: time, random: new Random(i)))];
         using var cts = new CancellationTokenSource();
 
-        Task[] runs = devices.Select(d => d.RunAsync(channel.Writer, cts.Token)).ToArray();
+        Task[] runs = [.. devices.Select(d => d.RunAsync(channel.Writer, cts.Token))];
         for (int step = 0; step < 40; step++)
         {
             time.Advance(TimeSpan.FromMilliseconds(100));
@@ -108,7 +107,7 @@ public class SimulatedDeviceTests
 
         foreach (SimulatedDevice device in devices)
         {
-            long[] sequence = readings.Where(r => r.DeviceId == device.DeviceId).Select(r => r.SequenceNumber).ToArray();
+            long[] sequence = [.. readings.Where(r => r.DeviceId == device.DeviceId).Select(r => r.SequenceNumber)];
             Assert.True(sequence.Length > 1, $"{device.DeviceId} emitted {sequence.Length} readings");
             Assert.Equal(Enumerable.Range(1, sequence.Length).Select(i => (long)i), sequence);
         }

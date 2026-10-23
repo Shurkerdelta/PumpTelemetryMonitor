@@ -20,7 +20,7 @@ public class AlertMonitorTests
         }
     }
 
-    private AlertType[] Types() => _alerts.Select(a => a.Type).ToArray();
+    private AlertType[] Types() => [.. _alerts.Select(a => a.Type)];
 
     [Fact]
     public async Task HighPressure_AlertsOnEveryReadingAboveThreshold()
@@ -95,6 +95,6 @@ public class AlertMonitorTests
             Reading(1, deviceId: "pump-2")); // other devices track their own sequence
 
         Assert.Equal([AlertType.OutOfOrderSequence, AlertType.OutOfOrderSequence], Types());
-        Assert.Equal("Sequence #3 arrived after #4", _alerts.First().Message);
+        Assert.Equal("Sequence #3 arrived after #4", _alerts[0].Message);
     }
 }

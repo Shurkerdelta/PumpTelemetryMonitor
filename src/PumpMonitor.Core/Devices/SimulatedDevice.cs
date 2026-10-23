@@ -206,6 +206,6 @@ public sealed class SimulatedDevice
     private TimeSpan NextInterval()
     {
         TimeSpan range = _options.MaxInterval - _options.MinInterval;
-        return _options.MinInterval + range * _random.NextDouble();
+        return _options.MinInterval + (range * _random.NextDouble());
     }
 }

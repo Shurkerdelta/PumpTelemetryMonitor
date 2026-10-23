@@ -27,6 +27,9 @@ public sealed class DeviceCommandHandler
     private readonly AlertOptions? _alertOptions;
     private readonly Toggle? _showReadings;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DeviceCommandHandler"/> class.
+    /// </summary>
     /// <param name="devices">Devices that on/off/status/fault act on.</param>
     /// <param name="alertOptions">Alert thresholds that <c>status</c> shows and faults are sized from, if alerts are enabled.</param>
     /// <param name="showReadings">Setting the <c>readings</c> command flips, if reading output can be toggled.</param>
@@ -134,7 +137,7 @@ public sealed class DeviceCommandHandler
         out SimulatedDevice[] targets,
         [NotNullWhen(false)] out CommandResult? error)
     {
-        string[] unknown = deviceIds.Where(id => !_devices.ContainsKey(id)).ToArray();
+        string[] unknown = [.. deviceIds.Where(id => !_devices.ContainsKey(id))];
         if (unknown.Length > 0)
         {
             string names = string.Join(", ", unknown.Select(id => $"'{id}'"));
@@ -145,8 +148,8 @@ public sealed class DeviceCommandHandler
         }
 
         targets = deviceIds.Length == 0
-            ? _devices.Values.ToArray()
-            : deviceIds.Select(id => _devices[id]).Distinct().ToArray();
+            ? [.. _devices.Values]
+            : [.. deviceIds.Select(id => _devices[id]).Distinct()];
         error = null;
         return true;
     }

@@ -30,6 +30,9 @@ public sealed class TelemetryPipeline : IAsyncDisposable
     private Task? _processing;
     private long _droppedCount;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="TelemetryPipeline"/> class.
+    /// </summary>
     /// <param name="handlers">Steps run for each reading, in the order given.</param>
     /// <param name="onHandlerError">
     /// Called when a handler throws. The pipeline carries on with the remaining handlers and readings.
@@ -49,7 +52,7 @@ public sealed class TelemetryPipeline : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(onHandlerError);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
 
-        _handlers = handlers.ToArray();
+        _handlers = [.. handlers];
         _onHandlerError = onHandlerError;
         _channel = Channel.CreateBounded<TelemetryReading>(
             new BoundedChannelOptions(capacity)

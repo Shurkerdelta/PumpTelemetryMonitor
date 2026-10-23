@@ -24,7 +24,7 @@ public class SilenceMonitorTests
     private static void Send(ChannelWriter<TelemetryReading> writer, string deviceId = "pump-1") =>
         Assert.True(writer.TryWrite(new TelemetryReading(deviceId, DateTimeOffset.UnixEpoch, 50, 60, 1)));
 
-    private AlertType[] Types() => _alerts.Select(a => a.Type).ToArray();
+    private AlertType[] Types() => [.. _alerts.Select(a => a.Type)];
 
     /// <summary>
     /// Advances fake time a check interval at a time until <paramref name="condition"/> holds. Timer
