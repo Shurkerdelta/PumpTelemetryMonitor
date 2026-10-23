@@ -11,9 +11,7 @@ Console.OutputEncoding = Encoding.UTF8;
 
 // App-level settings. Per-component defaults (pump behaviour, reading intervals, alert thresholds)
 // live on their options records: PumpProcessOptions, SimulatedDeviceOptions and AlertOptions.
-const int MinDeviceCount = 3;
-const int MaxDeviceCount = 5;
-const string DeviceIdPrefix = "pump-";
+// The device count (3–5) and naming live on DeviceFleet.
 TimeSpan silenceCheckInterval = TimeSpan.FromMilliseconds(500); // bounds how late a silence alert can be
 TimeSpan drainTimeout = TimeSpan.FromSeconds(5);                // how long shutdown waits for queued readings
 
@@ -22,9 +20,7 @@ TimeSpan drainTimeout = TimeSpan.FromSeconds(5);                // how long shut
 var showReadings = new Toggle(args.Any(a => a is "--show-readings" or "-v"));
 string[] unknownArgs = [.. args.Where(a => a is not ("--show-readings" or "-v"))];
 
-int deviceCount = Random.Shared.Next(MinDeviceCount, MaxDeviceCount + 1);
-SimulatedDevice[] devices = [.. Enumerable.Range(1, deviceCount)
-    .Select(i => new SimulatedDevice($"{DeviceIdPrefix}{i}"))];
+SimulatedDevice[] devices = DeviceFleet.Create();
 
 // All console output goes through one object so log lines never break up the operator's typing.
 var ui = new ConsoleUi();
@@ -65,7 +61,7 @@ if (unknownArgs.Length > 0)
     ui.WriteError($"Ignoring unknown arguments: {string.Join(" ", unknownArgs)}. Supported: --show-readings (-v)");
 }
 
-ui.WriteLine($"Started {deviceCount} devices: {string.Join(", ", devices.Select(d => d.DeviceId))}");
+ui.WriteLine($"Started {devices.Length} devices: {string.Join(", ", devices.Select(d => d.DeviceId))}");
 ui.WriteLine(showReadings.IsOn
     ? "Printing every reading. Type 'readings off' to hide them."
     : "Readings are hidden; only alerts are printed. Type 'readings on' (or start with --show-readings) to see them.");
