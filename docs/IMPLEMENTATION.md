@@ -69,11 +69,16 @@ pump-n ─┘
 
 Each device loop is:
 
-1. Read the clock once (`now`).
-2. Take a reading stamped with `now`, give it the next sequence number, and write it to the channel.
-3. Wait until `now + NextInterval()`, then repeat.
+1. Note the steady (monotonic) clock: `started = TimeProvider.GetTimestamp()`.
+2. Take a reading stamped with the wall-clock time, give it the next sequence number, and write it to the channel.
+3. Wait until `NextInterval()` has passed since `started`, then repeat.
 
 Cancellation ends the loop normally, without throwing.
+
+Only the reading's timestamp comes from the wall clock. Every duration (the gap between readings, the time since
+the last reading that the pump model is given, how long an injected fault lasts) is measured on the steady clock,
+so a system clock change (an NTP step or a manual adjustment) can't stall a device, fake a burst of noise, or cut
+a fault short.
 
 ### Keeping gaps within 100–500 ms
 
@@ -84,7 +89,7 @@ range, measured on the real clock:
   so time spent writing it comes out of the wait instead of being added to it.
 - **Allowance for OS timer imprecision.** On Windows, `Task.Delay` can wake up to about 16 ms late (the timer
   ticks every 15.6 ms) and occasionally about 1 ms early. To handle this:
-  - **Never early:** `WaitUntilAsync` checks the clock after waking and waits out any remainder, so a reading is
+  - **Never early:** `WaitForGapAsync` checks the clock after waking and waits out any remainder, so a reading is
     never taken before it is due.
   - **Room for late:** `TimerSlack` (default 20 ms) is reserved below `MaxInterval`, so the target gap is drawn
     from 100–480 ms and a late wake-up still lands under 500 ms.
@@ -108,8 +113,8 @@ The values are not plain random numbers. `PumpProcessModel` simulates a frac pum
 - Noise is scaled by the square root of the time since the last reading (an Ornstein–Uhlenbeck process), so the
   curve looks the same whatever the reading interval.
 
-`SimulatedDevice` passes the model the on/off state and the elapsed time, and takes the values it returns. Tests
-replace the model with `StubPumpProcess` through the `IPumpProcess` interface.
+`SimulatedDevice` passes the model the on/off state and the elapsed time (on the steady clock), and takes the
+values it returns. Tests replace the model with `StubPumpProcess` through the `IPumpProcess` interface.
 
 ### Operator commands that affect telemetry
 
@@ -270,6 +275,13 @@ sustained spike alerts on each reading, not just once. A reading exactly at the 
 Temperature works the same way against 90 °C. `AlertOptions.Validate` rejects NaN and infinite thresholds,
 because no reading is ever above NaN and that alert would silently switch off.
 
+### Invalid values
+
+A pressure or temperature that is NaN or infinite raises `InvalidReading` ("Pressure reading NaN is not a finite
+number") instead of being compared with its threshold. Otherwise a failed sensor sending NaN would never alert,
+since no value is above NaN, and an infinite value would be reported as a real high pressure or temperature. Each
+value is checked on its own, so a bad pressure sensor doesn't hide a high temperature in the same reading.
+
 ### Out-of-order sequence numbers
 
 `AlertMonitor` remembers the highest sequence number seen from each device. A reading whose number is at or
@@ -336,6 +348,9 @@ The relevant tests are in [tests/PumpMonitor.Tests/Devices](../tests/PumpMonitor
 - that delivery time comes out of the wait
 - contiguous, ordered sequence numbers from concurrent devices sharing a channel
 - the 3–5 device count and the `pump-n` naming
+- system clock steps that don't change the reading interval, the elapsed time given to the model, or how long a
+  fault lasts
+- each operator command, including that every `fault` word injects the matching fault
 
 The pipeline tests are in [tests/PumpMonitor.Tests/Processing](../tests/PumpMonitor.Tests/Processing). They cover:
 
@@ -355,9 +370,15 @@ The alert tests are in [tests/PumpMonitor.Tests/Alerts](../tests/PumpMonitor.Tes
 - out-of-order and duplicate sequence numbers, per device, with gaps allowed
 - silence after more than 5 s, once per silence, for devices that never report, and with a stalled queue
 - system clock steps forward and back that don't change measured silence
+- NaN and infinite values raising `InvalidReading` instead of a threshold alert
 - a failing alert callback that doesn't lose the other alerts
 - every injected fault raising its matching alert
+
+The smoke tests in [tests/PumpMonitor.Tests/App](../tests/PumpMonitor.Tests/App) run the real console app with
+piped input: startup, `status`, a `fault spike` that prints an alert, and a clean exit on `quit` or end of input.
 
 ```bash
 dotnet test
 ```
+
+The same command runs in GitHub Actions on every push to `main` and every pull request, on Ubuntu and Windows.

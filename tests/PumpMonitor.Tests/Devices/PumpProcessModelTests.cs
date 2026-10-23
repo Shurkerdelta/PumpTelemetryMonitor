@@ -76,6 +76,31 @@ public class PumpProcessModelTests
     }
 
     [Fact]
+    public void StartsFromInitialValues_OrIdleByDefault_AndZeroElapsedChangesNothing()
+    {
+        var options = new PumpProcessOptions { InitialPressure = 40, InitialTemperature = 65 };
+
+        // Noise is on (the defaults), but no time has passed, so neither value may move.
+        Assert.Equal(new ProcessState(40, 65), new PumpProcessModel(options, new Random(1)).Next(isRunning: true, TimeSpan.Zero));
+        Assert.Equal(
+            new ProcessState(options.IdlePressure, options.IdleTemperature),
+            new PumpProcessModel(random: new Random(1)).Next(isRunning: true, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void Pressure_NeverGoesBelowZero_HoweverLargeTheNoise()
+    {
+        // At the default 1% the clamp is practically never reached; 200% per √s drives about one step in six below zero.
+        var model = new PumpProcessModel(new PumpProcessOptions { RelativePressureNoise = 2 }, new Random(5));
+        var trace = new List<ProcessState>();
+
+        RunFor(model, isRunning: true, TimeSpan.FromSeconds(30), trace);
+
+        Assert.All(trace, s => Assert.True(s.Pressure >= 0, $"pressure {s.Pressure}"));
+        Assert.Contains(trace, s => s.Pressure == 0); // the clamp was actually exercised
+    }
+
+    [Fact]
     public void NoiseMakesRunsDifferButKeepsPressureNonNegative()
     {
         var trace1 = new List<ProcessState>();

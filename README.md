@@ -1,7 +1,8 @@
 # Pump Telemetry Monitor
 
 A .NET 10 console app that simulates a fleet of 3–5 frac pumps. It streams their telemetry through a concurrent
-processing pipeline and prints alerts for high pressure, out-of-order readings and silent devices.
+processing pipeline and prints alerts for high pressure, out-of-order readings, invalid values and silent devices.
+Tests run in GitHub Actions on Ubuntu and Windows.
 
 ```bash
 dotnet run --project src/PumpMonitor.App -- --show-readings

@@ -1,7 +1,9 @@
+using System.Threading.Channels;
 using Microsoft.Extensions.Time.Testing;
 using PumpMonitor.Core;
 using PumpMonitor.Core.Alerts;
 using PumpMonitor.Core.Devices;
+using PumpMonitor.Core.Telemetry;
 
 namespace PumpMonitor.Tests.Devices;
 
@@ -13,6 +15,8 @@ public class DeviceCommandHandlerTests
         new("pump-2"),
         new("pump-3"),
     ];
+
+    private readonly FakeTimeProvider _commandTime = new();
 
     private DeviceCommandHandler CreateHandler() => new(_devices);
 
@@ -26,6 +30,59 @@ public class DeviceCommandHandlerTests
 
         handler.Execute("ON");
         Assert.All(_devices, d => Assert.True(d.IsOn));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    public void BlankInput_DoesNothing(string? input)
+    {
+        CommandResult result = CreateHandler().Execute(input);
+
+        Assert.Equal(new CommandResult(""), result);
+        Assert.All(_devices, d => Assert.True(d.IsOn));
+    }
+
+    [Fact]
+    public void Help_ShowsHelpText()
+    {
+        Assert.Equal(new CommandResult(DeviceCommandHandler.HelpText), CreateHandler().Execute("HELP"));
+    }
+
+    [Fact]
+    public void UnknownCommand_EchoesItAsTyped_ShowsHelp_AndChangesNothing()
+    {
+        CommandResult result = CreateHandler().Execute("Reboot pump-1");
+
+        Assert.Equal($"Unknown command 'Reboot'. {DeviceCommandHandler.HelpText}", result.Message);
+        Assert.False(result.ExitRequested);
+        Assert.All(_devices, d => Assert.True(d.IsOn));
+    }
+
+    [Theory]
+    [InlineData("off\tpump-2")]
+    [InlineData("  off   pump-2  ")]
+    [InlineData("off \t pump-2\r")]
+    public void ArgumentsMayBeSeparatedByAnyWhitespace(string input)
+    {
+        CommandResult result = CreateHandler().Execute(input);
+
+        Assert.Equal("Turned off: pump-2", result.Message);
+        Assert.Equal([true, false, true], _devices.Select(d => d.IsOn));
+    }
+
+    [Fact]
+    public void OnWithId_SwitchesOnlyThatDevice()
+    {
+        DeviceCommandHandler handler = CreateHandler();
+        handler.Execute("off");
+
+        CommandResult result = handler.Execute("on pump-2");
+
+        Assert.Equal("Turned on: pump-2", result.Message);
+        Assert.Equal([false, true, false], _devices.Select(d => d.IsOn));
     }
 
     [Fact]
@@ -175,7 +232,53 @@ public class DeviceCommandHandlerTests
     [Fact]
     public void Fault_WithoutIds_AppliesToAllDevices()
     {
-        Assert.Equal("Injected reorder: all devices", CreateHandler().Execute("fault reorder").Message);
+        var time = new FakeTimeProvider();
+        SimulatedDevice[] devices = [.. new[] { "pump-1", "pump-2" }.Select(id =>
+            new SimulatedDevice(id, new StubPumpProcess(new ProcessState(55, 70)), timeProvider: time))];
+
+        CommandResult result = new DeviceCommandHandler(devices).Execute("fault overheat");
+
+        Assert.Equal("Injected overheat: all devices", result.Message);
+        Assert.All(devices, d => Assert.True(d.TakeReading().Temperature > new AlertOptions().TemperatureThreshold));
+    }
+
+    [Fact]
+    public async Task Fault_Silence_SilencesTheDeviceForTheConfiguredTimeoutPlusMargin()
+    {
+        var options = new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(1) };
+        List<TelemetryReading> readings = await RunAfterCommandAsync("fault silence", options, count: 1);
+
+        TimeSpan silent = TimeSpan.FromSeconds(1) + new SimulatedDeviceOptions().FaultSilenceMargin;
+        TelemetryReading first = Assert.Single(readings);
+        Assert.True(first.Timestamp >= _commandTime.Start + silent, $"first reading at {first.Timestamp:O}");
+    }
+
+    [Fact]
+    public async Task Fault_Reorder_SwapsTheNextTwoReadings()
+    {
+        List<TelemetryReading> readings = await RunAfterCommandAsync("fault reorder", new AlertOptions(), count: 2);
+
+        Assert.Equal([2L, 1], readings.Select(r => r.SequenceNumber));
+    }
+
+    /// <summary>Runs <paramref name="command"/> against one fake-time device, then collects its first readings.</summary>
+    private async Task<List<TelemetryReading>> RunAfterCommandAsync(string command, AlertOptions options, int count)
+    {
+        TimeSpan interval = TimeSpan.FromMilliseconds(200);
+        var device = new SimulatedDevice(
+            "pump-1",
+            new StubPumpProcess(new ProcessState(55, 70)),
+            new SimulatedDeviceOptions { MinInterval = interval, MaxInterval = interval },
+            _commandTime);
+        var channel = Channel.CreateUnbounded<TelemetryReading>();
+        using var cts = new CancellationTokenSource();
+
+        new DeviceCommandHandler([device], options).Execute(command);
+        Task run = device.RunAsync(channel.Writer, cts.Token);
+        List<TelemetryReading> readings = await ReadingCollector.CollectAsync(_commandTime, channel.Reader, count, interval);
+        cts.Cancel();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+        return readings;
     }
 
     [Theory]

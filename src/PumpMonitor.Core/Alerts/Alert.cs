@@ -6,6 +6,9 @@ public enum AlertType
     HighTemperature,
     OutOfOrderSequence,
     DeviceSilent,
+
+    /// <summary>A pressure or temperature value is NaN or infinite: a sensor or transmission fault, not a real measurement.</summary>
+    InvalidReading,
 }
 
 /// <summary>An abnormal condition detected for one device.</summary>

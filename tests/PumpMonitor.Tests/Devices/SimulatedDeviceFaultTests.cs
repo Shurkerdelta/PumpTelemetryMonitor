@@ -22,32 +22,11 @@ public class SimulatedDeviceFaultTests
 
     private readonly FakeTimeProvider _time = new();
 
-    private SimulatedDevice CreateDevice() =>
-        new("pump-1", new StubPumpProcess(new ProcessState(55, 70)), Options, _time);
+    private SimulatedDevice CreateDevice(TimeProvider? time = null) =>
+        new("pump-1", new StubPumpProcess(new ProcessState(55, 70)), Options, time ?? _time);
 
-    /// <summary>
-    /// Advances fake time in interval steps until <paramref name="count"/> readings arrive. Delay continuations
-    /// run on the thread pool, so each step waits briefly for the device loop to catch up; overshooting is harmless.
-    /// </summary>
-    private async Task<List<TelemetryReading>> CollectAsync(ChannelReader<TelemetryReading> reader, int count)
-    {
-        var readings = new List<TelemetryReading>();
-        for (int step = 0; step < 200 && readings.Count < count; step++)
-        {
-            while (readings.Count < count && reader.TryRead(out TelemetryReading? reading))
-            {
-                readings.Add(reading);
-            }
-
-            if (readings.Count < count)
-            {
-                _time.Advance(Interval);
-                await Task.Delay(5);
-            }
-        }
-
-        return readings;
-    }
+    private Task<List<TelemetryReading>> CollectAsync(ChannelReader<TelemetryReading> reader, int count) =>
+        ReadingCollector.CollectAsync(_time, reader, count, Interval);
 
     [Theory]
     [InlineData(69, 74)] // threshold above actual (55): reads threshold + margin
@@ -125,15 +104,95 @@ public class SimulatedDeviceFaultTests
         Assert.Equal([2L, 1, 3, 4], readings.Select(r => r.SequenceNumber));
     }
 
+    [Fact]
+    public void InjectingAnActiveFault_RestartsIt()
+    {
+        SimulatedDevice device = CreateDevice();
+
+        device.InjectFault(DeviceFault.PressureSpike);
+        _time.Advance(TimeSpan.FromSeconds(0.6));
+        device.InjectFault(DeviceFault.PressureSpike);
+        _time.Advance(TimeSpan.FromSeconds(0.6));
+        TelemetryReading pastFirstWindow = device.TakeReading(); // 1.2s after the first injection, 0.6s after the second
+        _time.Advance(TimeSpan.FromSeconds(0.4));
+        TelemetryReading pastSecondWindow = device.TakeReading();
+
+        Assert.True(pastFirstWindow.Pressure > new AlertOptions().PressureThreshold, $"pressure {pastFirstWindow.Pressure}");
+        Assert.Equal(55, pastSecondWindow.Pressure);
+    }
+
+    [Theory]
+    [InlineData(1)]  // clock stepped forward: must not end the fault early
+    [InlineData(-1)] // clock stepped back: must not stretch the fault out
+    public void SpikeAndOverheat_LastFaultDuration_WhateverTheWallClockDoes(int clockStepHours)
+    {
+        var clock = new ClockStepTimeProvider(_time);
+        SimulatedDevice device = CreateDevice(clock);
+
+        device.InjectFault(DeviceFault.PressureSpike);
+        device.InjectFault(DeviceFault.Overheat);
+        clock.WallClockOffset = TimeSpan.FromHours(clockStepHours);
+        _time.Advance(TimeSpan.FromSeconds(0.9));
+        TelemetryReading during = device.TakeReading();
+        _time.Advance(TimeSpan.FromSeconds(0.1));
+        TelemetryReading after = device.TakeReading();
+
+        Assert.Equal((new AlertOptions().PressureThreshold + 5, new AlertOptions().TemperatureThreshold + 5), (during.Pressure, during.Temperature));
+        Assert.Equal((55, 70), (after.Pressure, after.Temperature));
+    }
+
+    [Fact]
+    public async Task Silence_IsNotCutShortByTheWallClockSteppingForward()
+    {
+        var clock = new ClockStepTimeProvider(_time);
+        SimulatedDevice device = CreateDevice(clock);
+        var channel = Channel.CreateUnbounded<TelemetryReading>();
+        using var cts = new CancellationTokenSource();
+
+        // 1s timeout + 1s margin = silent for 2s of real time, however far the clock jumps.
+        device.InjectFault(DeviceFault.Silence, new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(1) });
+        clock.WallClockOffset = TimeSpan.FromHours(1);
+        Task run = device.RunAsync(channel.Writer, cts.Token);
+        List<TelemetryReading> readings = await CollectAsync(channel.Reader, 1);
+        cts.Cancel();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        TelemetryReading first = Assert.Single(readings);
+        Assert.True(first.Timestamp >= _time.Start.AddHours(1).AddSeconds(2), $"first reading at {first.Timestamp:O}");
+    }
+
+    [Fact]
+    public void InjectFault_RejectsUnknownFault()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => CreateDevice().InjectFault((DeviceFault)99));
+    }
+
     [Theory]
     [InlineData(0, 5)]
     [InlineData(5, 0)]
+    [InlineData(-1, 5)]
     public void Constructor_RejectsNonPositiveMargins(double pressureMargin, double temperatureMargin)
     {
         var options = new SimulatedDeviceOptions
         {
             FaultPressureMargin = pressureMargin,
             FaultTemperatureMargin = temperatureMargin,
+        };
+
+        Assert.Throws<ArgumentException>(() => new SimulatedDevice("pump-1", options: options));
+    }
+
+    [Theory]
+    [InlineData(0, 1000)]
+    [InlineData(-1, 1000)]
+    [InlineData(1000, 0)]
+    [InlineData(1000, -1)]
+    public void Constructor_RejectsNonPositiveFaultDurationOrSilenceMargin(int durationMs, int silenceMarginMs)
+    {
+        var options = new SimulatedDeviceOptions
+        {
+            FaultDuration = TimeSpan.FromMilliseconds(durationMs),
+            FaultSilenceMargin = TimeSpan.FromMilliseconds(silenceMarginMs),
         };
 
         Assert.Throws<ArgumentException>(() => new SimulatedDevice("pump-1", options: options));
