@@ -174,4 +174,50 @@ public class AlertMonitorTests
         Assert.Equal([AlertType.OutOfOrderSequence, AlertType.OutOfOrderSequence], Types());
         Assert.Equal("Sequence #3 arrived after #4", _alerts[0].Message);
     }
+
+    [Fact]
+    public async Task FailingAlertCallback_StillDeliversTheReadingsOtherAlerts()
+    {
+        var monitor = new AlertMonitor(alert =>
+        {
+            if (alert.Type == AlertType.OutOfOrderSequence)
+            {
+                throw new IOException("console write failed");
+            }
+
+            _alerts.Add(alert);
+        });
+        await Feed(monitor, Reading(2));
+
+        // A late reading that is also over both thresholds: its out-of-order alert fails to deliver...
+        var ex = await Assert.ThrowsAsync<AggregateException>(
+            async () => await monitor.HandleAsync(Reading(1, pressure: 100, temperature: 100), CancellationToken.None));
+
+        // ...but the high pressure and temperature alerts behind it still arrive.
+        Assert.IsType<IOException>(Assert.Single(ex.InnerExceptions));
+        Assert.Equal([AlertType.HighPressure, AlertType.HighTemperature], Types());
+    }
+
+    [Fact]
+    public async Task FailingAlertCallbackForAnInvalidValue_StillDeliversTheReadingsOtherAlerts()
+    {
+        var monitor = new AlertMonitor(alert =>
+        {
+            if (alert.Type == AlertType.InvalidReading)
+            {
+                throw new IOException("console write failed");
+            }
+
+            _alerts.Add(alert);
+        });
+        await Feed(monitor, Reading(2));
+
+        // A late reading with a failed pressure sensor and a high temperature: the invalid-value alert fails...
+        var ex = await Assert.ThrowsAsync<AggregateException>(
+            async () => await monitor.HandleAsync(Reading(1, pressure: double.NaN, temperature: 100), CancellationToken.None));
+
+        // ...but the alerts before and after it still arrive.
+        Assert.IsType<IOException>(Assert.Single(ex.InnerExceptions));
+        Assert.Equal([AlertType.OutOfOrderSequence, AlertType.HighTemperature], Types());
+    }
 }

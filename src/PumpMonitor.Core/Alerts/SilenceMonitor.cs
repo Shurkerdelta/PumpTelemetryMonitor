@@ -15,9 +15,9 @@ namespace PumpMonitor.Core.Alerts;
 /// the devices' threads and checks from the timer, so per-device state is shared under a lock.
 /// </para>
 /// <para>
-/// Quiet time is measured with <see cref="TimeProvider.GetTimestamp"/>, which is monotonic, not the wall clock:
-/// a system clock change (an NTP correction, a manual change) must neither flag every device as silent nor
-/// hide a device that really has gone quiet.
+/// Quiet time is measured with the monotonic <see cref="TimeProvider.GetTimestamp"/>, not wall-clock time: a
+/// system clock change (NTP correction, manual adjustment) would otherwise report every device silent at once
+/// when the clock steps forward, or hide a real silence for as long as it steps back.
 /// </para>
 /// <para>
 /// Alerts once per silent period and re-arms when the device is heard from again.
@@ -77,25 +77,26 @@ public sealed class SilenceMonitor
     /// <exception cref="AggregateException">The alert callback threw. Every other alert was still delivered.</exception>
     public void CheckForSilentDevices()
     {
-        DateTimeOffset now = _timeProvider.GetUtcNow();
-        long timestamp = _timeProvider.GetTimestamp();
+        long now = _timeProvider.GetTimestamp();
+        DateTimeOffset detectedAt = _timeProvider.GetUtcNow();
         List<Alert> alerts = [];
 
         lock (_gate)
         {
             foreach ((string deviceId, DeviceState state) in _devices)
             {
-                TimeSpan quiet = _timeProvider.GetElapsedTime(state.LastSeen, timestamp);
+                TimeSpan quiet = _timeProvider.GetElapsedTime(state.LastSeen, now);
                 if (!state.Silent && quiet > _timeout)
                 {
                     state.Silent = true;
                     alerts.Add(new Alert(deviceId, AlertType.DeviceSilent,
-                        $"No readings for {quiet.TotalSeconds:F1}s (limit {_timeout.TotalSeconds:F1}s)", now));
+                        $"No readings for {quiet.TotalSeconds:F1}s (limit {_timeout.TotalSeconds:F1}s)", detectedAt));
                 }
             }
         }
 
-        Raise(alerts);
+        // Silent is already set for each of these, so an alert skipped because an earlier one threw would never be raised.
+        AlertDelivery.DeliverAll(_onAlert, alerts);
     }
 
     /// <summary>
@@ -142,29 +143,6 @@ public sealed class SilenceMonitor
         }
     }
 
-    private void Raise(List<Alert> alerts)
-    {
-        // Silent is already set for each of these, so an alert skipped because an earlier one threw would
-        // never be raised. Deliver them all, then report the failures.
-        List<Exception> errors = [];
-        foreach (Alert alert in alerts)
-        {
-            try
-            {
-                _onAlert(alert);
-            }
-            catch (Exception ex)
-            {
-                errors.Add(ex);
-            }
-        }
-
-        if (errors.Count > 0)
-        {
-            throw new AggregateException(errors);
-        }
-    }
-
     private static void ReportError(Action<Exception> onError, Exception ex)
     {
         try
@@ -180,7 +158,7 @@ public sealed class SilenceMonitor
 
     private sealed class DeviceState(long lastSeen)
     {
-        /// <summary>When the device was last heard from, as a <see cref="TimeProvider.GetTimestamp"/> value.</summary>
+        /// <summary>A <see cref="TimeProvider.GetTimestamp"/> value, not a wall-clock time.</summary>
         public long LastSeen = lastSeen;
         public bool Silent;
     }

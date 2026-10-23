@@ -49,9 +49,12 @@ public sealed class SimulatedDevice
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
         _options = options ?? new SimulatedDeviceOptions();
-        if (_options.MinInterval <= TimeSpan.Zero || _options.MaxInterval < _options.MinInterval)
+        if (_options.MinInterval <= TimeSpan.Zero
+            || _options.MaxInterval < _options.MinInterval
+            || _options.TimerSlack < TimeSpan.Zero)
         {
-            throw new ArgumentException("Intervals must be positive and MinInterval <= MaxInterval.", nameof(options));
+            throw new ArgumentException(
+                "Intervals must be positive, MinInterval <= MaxInterval, and TimerSlack not negative.", nameof(options));
         }
 
         // Margins must be positive or a fault could land exactly on a threshold, which doesn't alert.
@@ -121,10 +124,12 @@ public sealed class SimulatedDevice
     /// <see cref="RunAsync"/>; exposed so tests can drive the device step by step. Not intended to be
     /// called concurrently with itself or with <see cref="RunAsync"/>.
     /// </summary>
-    public TelemetryReading TakeReading()
+    public TelemetryReading TakeReading() => TakeReading(_timeProvider.GetTimestamp());
+
+    /// <param name="timestamp">When the reading is taken, as a <see cref="TimeProvider.GetTimestamp"/> value.</param>
+    private TelemetryReading TakeReading(long timestamp)
     {
         DateTimeOffset now = _timeProvider.GetUtcNow();
-        long timestamp = _timeProvider.GetTimestamp();
         TimeSpan elapsed = _lastReadingTimestamp is { } last ? _timeProvider.GetElapsedTime(last, timestamp) : TimeSpan.Zero;
         _lastReadingTimestamp = timestamp;
 
@@ -148,14 +153,21 @@ public sealed class SimulatedDevice
     }
 
     /// <summary>
-    /// Emits a reading, waits a random interval, and repeats until <paramref name="cancellationToken"/>
+    /// Emits a reading, waits a random gap between <see cref="SimulatedDeviceOptions.MinInterval"/> and
+    /// <see cref="SimulatedDeviceOptions.MaxInterval"/>, and repeats until <paramref name="cancellationToken"/>
     /// is cancelled. Cancellation is a normal shutdown and completes the task without throwing.
     /// The writer is not completed here because several devices typically share one channel.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// Each gap runs from when the previous reading was taken, so time spent delivering it comes out of the
+    /// wait instead of stretching the gap.
+    /// </para>
+    /// <para>
     /// Silence and reorder faults act here because they change delivery rather than values: while silent
     /// no readings are taken (so no sequence numbers are skipped), and a reorder holds one reading back
     /// and sends it after the next.
+    /// </para>
     /// </remarks>
     public async Task RunAsync(ChannelWriter<TelemetryReading> writer, CancellationToken cancellationToken)
     {
@@ -165,9 +177,10 @@ public sealed class SimulatedDevice
         {
             while (true)
             {
-                if (!IsSilent())
+                long started = _timeProvider.GetTimestamp();
+                if (!IsSilent(started))
                 {
-                    TelemetryReading reading = TakeReading();
+                    TelemetryReading reading = TakeReading(started);
                     if (heldBack is not null)
                     {
                         await writer.WriteAsync(reading, cancellationToken);
@@ -184,7 +197,7 @@ public sealed class SimulatedDevice
                     }
                 }
 
-                await Task.Delay(NextInterval(), _timeProvider, cancellationToken);
+                await WaitForGapAsync(started, NextInterval(), cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -192,9 +205,8 @@ public sealed class SimulatedDevice
         }
     }
 
-    private bool IsSilent()
+    private bool IsSilent(long now)
     {
-        long now = _timeProvider.GetTimestamp();
         lock (_faultGate)
         {
             return IsActive(_silence, now);
@@ -216,8 +228,25 @@ public sealed class SimulatedDevice
 
     private TimeSpan NextInterval()
     {
-        TimeSpan range = _options.MaxInterval - _options.MinInterval;
+        // Aim below MaxInterval by the timer slack so a timer that wakes late still lands within the range.
+        TimeSpan latest = _options.MaxInterval - _options.TimerSlack;
+        TimeSpan range = latest > _options.MinInterval ? latest - _options.MinInterval : TimeSpan.Zero;
         return _options.MinInterval + (range * _random.NextDouble());
+    }
+
+    /// <summary>Waits until <paramref name="gap"/> has passed since <paramref name="since"/> (a <see cref="TimeProvider.GetTimestamp"/> value).</summary>
+    private async Task WaitForGapAsync(long since, TimeSpan gap, CancellationToken cancellationToken)
+    {
+        // OS timers run on a coarse tick and can wake a millisecond or so early, so wait out any remainder
+        // rather than take the next reading before it is due. Task.Delay drops fractions of a millisecond, so
+        // round up: a sub-millisecond remainder would otherwise become Delay(0) and spin until the clock moves.
+        // Measured on the monotonic timestamp: on the wall clock, a clock stepped back would stall the device.
+        TimeSpan wait;
+        while ((wait = gap - _timeProvider.GetElapsedTime(since)) > TimeSpan.Zero)
+        {
+            await Task.Delay(
+                TimeSpan.FromMilliseconds(Math.Ceiling(wait.TotalMilliseconds)), _timeProvider, cancellationToken);
+        }
     }
 
     /// <summary>A timed fault: when it started (a <see cref="TimeProvider.GetTimestamp"/> value) and how long it lasts.</summary>

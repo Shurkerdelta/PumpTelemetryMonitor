@@ -3,11 +3,21 @@ namespace PumpMonitor.Core.Devices;
 /// <summary>Timing, start-up and fault-injection behaviour for a <see cref="SimulatedDevice"/>.</summary>
 public sealed record SimulatedDeviceOptions
 {
-    /// <summary>Shortest delay between readings.</summary>
+    /// <summary>Shortest gap between readings. A reading is never taken sooner.</summary>
     public TimeSpan MinInterval { get; init; } = TimeSpan.FromMilliseconds(100);
 
-    /// <summary>Longest delay between readings. Set equal to <see cref="MinInterval"/> for a fixed rate.</summary>
+    /// <summary>
+    /// Longest gap between readings, allowing for <see cref="TimerSlack"/>. Set equal to <see cref="MinInterval"/>
+    /// for a fixed rate.
+    /// </summary>
     public TimeSpan MaxInterval { get; init; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// How late the OS timer may wake the device. Gaps are aimed at most this far below <see cref="MaxInterval"/>
+    /// so a late wake-up still lands within it; Windows timers tick about every 15.6 ms. When that leaves no room
+    /// above <see cref="MinInterval"/>, gaps are aimed at <see cref="MinInterval"/> and may run up to this much over.
+    /// </summary>
+    public TimeSpan TimerSlack { get; init; } = TimeSpan.FromMilliseconds(20);
 
     /// <summary>Whether the pump is running when the device is created.</summary>
     public bool StartOn { get; init; } = true;

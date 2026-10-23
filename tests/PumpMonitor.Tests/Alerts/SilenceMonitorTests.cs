@@ -18,8 +18,9 @@ public class SilenceMonitorTests
     // Nothing reads this channel, so readings pile up as if the pipeline's consumer had stalled.
     private readonly Channel<TelemetryReading> _queue = Channel.CreateUnbounded<TelemetryReading>();
 
-    private SilenceMonitor CreateMonitor(IEnumerable<string>? expected = null, Action<Alert>? onAlert = null) =>
-        new(onAlert ?? _alerts.Enqueue, new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(5) }, expected, _time);
+    private SilenceMonitor CreateMonitor(
+        IEnumerable<string>? expected = null, Action<Alert>? onAlert = null, TimeProvider? clock = null) =>
+        new(onAlert ?? _alerts.Enqueue, new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(5) }, expected, clock ?? _time);
 
     private static void Send(ChannelWriter<TelemetryReading> writer, string deviceId = "pump-1") =>
         Assert.True(writer.TryWrite(new TelemetryReading(deviceId, DateTimeOffset.UnixEpoch, 50, 60, 1)));
@@ -64,28 +65,27 @@ public class SilenceMonitorTests
     }
 
     [Theory]
-    [InlineData(60)]  // stepped forward: must not flag a device that just reported
-    [InlineData(-60)] // stepped back: must not hide a device that has gone quiet
-    public void WallClockSteps_NeitherFakeNorHideSilence(int clockStepSeconds)
+    [InlineData(3600)]  // stepping forward an hour must not report the device silent
+    [InlineData(-3600)] // stepping back an hour must not hide the silence that follows
+    public void SystemClockStep_DoesNotChangeMeasuredSilence(int stepSeconds)
     {
         var clock = new ClockStepTimeProvider(_time);
-        var monitor = new SilenceMonitor(_alerts.Enqueue, new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(5) }, timeProvider: clock);
+        SilenceMonitor monitor = CreateMonitor(clock: clock);
         ChannelWriter<TelemetryReading> writer = monitor.Track(_queue.Writer);
         Send(writer);
 
-        clock.WallClockOffset = TimeSpan.FromSeconds(clockStepSeconds);
         _time.Advance(TimeSpan.FromSeconds(1));
+        clock.WallClockOffset = TimeSpan.FromSeconds(stepSeconds);
         monitor.CheckForSilentDevices();
         Assert.Empty(_alerts);
 
-        _time.Advance(TimeSpan.FromSeconds(5));
+        _time.Advance(TimeSpan.FromSeconds(4.1));
         monitor.CheckForSilentDevices();
 
         // Quiet time is real elapsed time; the alert is still stamped with the (stepped) wall clock.
         Alert alert = Assert.Single(_alerts);
-        Assert.Equal(
-            new Alert("pump-1", AlertType.DeviceSilent, $"No readings for {6.0:F1}s (limit {5.0:F1}s)", clock.GetUtcNow()),
-            alert);
+        Assert.Equal($"No readings for {5.1:F1}s (limit {5.0:F1}s)", alert.Message);
+        Assert.Equal(clock.GetUtcNow(), alert.Timestamp);
     }
 
     [Fact]
