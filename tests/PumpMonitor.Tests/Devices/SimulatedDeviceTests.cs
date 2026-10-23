@@ -53,7 +53,50 @@ public class SimulatedDeviceTests
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(-1)]
+    public void TakeReading_TimestampsFollowTheWallClock_ButElapsedTimeIgnoresClockSteps(int clockStepHours)
+    {
+        var time = new FakeTimeProvider();
+        var clock = new ClockStepTimeProvider(time);
+        var process = new StubPumpProcess(new ProcessState(0, 20));
+        var device = new SimulatedDevice("pump-1", process, FixedRate, clock);
+
+        device.TakeReading();
+        clock.WallClockOffset = TimeSpan.FromHours(clockStepHours);
+        time.Advance(TimeSpan.FromMilliseconds(200));
+        TelemetryReading second = device.TakeReading();
+
+        // A stepped clock fed to the process would look like an hour passed (or time ran backwards).
+        Assert.Equal([TimeSpan.Zero, TimeSpan.FromMilliseconds(200)], process.Calls.Select(c => c.Elapsed));
+        Assert.Equal(time.Start.AddHours(clockStepHours).AddMilliseconds(200), second.Timestamp);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Constructor_RejectsMissingId(string? deviceId)
+    {
+        Assert.ThrowsAny<ArgumentException>(() => new SimulatedDevice(deviceId!));
+    }
+
+    [Fact]
+    public void StartOn_SetsInitialState_AndTurnOnOffSwitchIt()
+    {
+        var device = new SimulatedDevice("pump-1", options: FixedRate with { StartOn = false });
+        Assert.False(device.IsOn);
+
+        device.TurnOn();
+        Assert.True(device.IsOn);
+
+        device.TurnOff();
+        Assert.False(device.IsOn);
+    }
+
+    [Theory]
     [InlineData(0, 100)]
+    [InlineData(-100, 100)]
     [InlineData(300, 200)]
     public void Constructor_RejectsInvalidIntervals(int minMs, int maxMs)
     {
@@ -81,6 +124,27 @@ public class SimulatedDeviceTests
 
         Assert.Equal(1, first.SequenceNumber);
         Assert.Equal(TaskStatus.RanToCompletion, run.Status);
+    }
+
+    [Fact]
+    public async Task RunAsync_SpacesReadingsRandomlyBetweenMinAndMaxInterval()
+    {
+        var time = new FakeTimeProvider();
+        var channel = Channel.CreateUnbounded<TelemetryReading>();
+        var options = new SimulatedDeviceOptions { MinInterval = TimeSpan.FromMilliseconds(100), MaxInterval = TimeSpan.FromMilliseconds(500) };
+        var device = new SimulatedDevice("pump-1", new StubPumpProcess(new ProcessState(1, 1)), options, time, new Random(3));
+        using var cts = new CancellationTokenSource();
+
+        Task run = device.RunAsync(channel.Writer, cts.Token);
+        List<TelemetryReading> readings = await ReadingCollector.CollectAsync(time, channel.Reader, 6, TimeSpan.FromMilliseconds(20));
+        cts.Cancel();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Timestamps land on 20 ms steps, and a busy thread pool can lag a step or two, so the upper bound has slack.
+        TimeSpan[] gaps = [.. readings.Zip(readings.Skip(1), (a, b) => b.Timestamp - a.Timestamp)];
+        Assert.Equal(5, gaps.Length);
+        Assert.All(gaps, g => Assert.InRange(g, options.MinInterval, options.MaxInterval + TimeSpan.FromMilliseconds(200)));
+        Assert.True(gaps.Distinct().Count() > 1, $"gaps should vary: {string.Join(", ", gaps)}");
     }
 
     [Fact]

@@ -69,6 +69,25 @@ public class TelemetryPipelineTests : IDisposable
                 : ValueTask.CompletedTask;
     }
 
+    /// <summary>Throws a cancellation of its own (e.g. its own timeout), not caused by the pipeline stopping.</summary>
+    private sealed class CancellingHandler(long cancelOnSequence) : ITelemetryHandler
+    {
+        public ValueTask HandleAsync(TelemetryReading reading, CancellationToken cancellationToken) =>
+            reading.SequenceNumber == cancelOnSequence
+                ? throw new OperationCanceledException()
+                : ValueTask.CompletedTask;
+    }
+
+    /// <summary>Appends "name#sequence" to a log shared with other handlers, to check the order they run in.</summary>
+    private sealed class LoggingHandler(string name, List<string> log) : ITelemetryHandler
+    {
+        public ValueTask HandleAsync(TelemetryReading reading, CancellationToken cancellationToken)
+        {
+            log.Add($"{name}#{reading.SequenceNumber}");
+            return ValueTask.CompletedTask;
+        }
+    }
+
     private void FailOnHandlerError(TelemetryReading reading, Exception ex) =>
         _unexpectedErrors.Add($"Handler failed on {reading}: {ex}");
 
@@ -234,6 +253,79 @@ public class TelemetryPipelineTests : IDisposable
 
         Assert.Equal(1, callbackCalls);
         Assert.Equal([1L, 2, 3], recorder.Readings.Select(r => r.SequenceNumber));
+    }
+
+    [Fact]
+    public async Task Handlers_RunInTheGivenOrder_ForEachReadingInTurn()
+    {
+        var log = new List<string>();
+        await using var pipeline = new TelemetryPipeline(
+            [new LoggingHandler("a", log), new LoggingHandler("b", log)], FailOnHandlerError);
+        pipeline.Start();
+        await pipeline.Writer.WriteAsync(Reading("pump-1", 1));
+        await pipeline.Writer.WriteAsync(Reading("pump-1", 2));
+
+        await pipeline.StopAsync().WaitAsync(Timeout);
+
+        Assert.Equal(["a#1", "b#1", "a#2", "b#2"], log);
+    }
+
+    [Fact]
+    public async Task HandlerCancellingOnItsOwn_IsReportedAsAnError_AndProcessingContinues()
+    {
+        // Not a shutdown, so it must not stop the pipeline.
+        var errors = new List<Exception>();
+        var recorder = new RecordingHandler();
+        await using var pipeline = new TelemetryPipeline(
+            [new CancellingHandler(cancelOnSequence: 1), recorder],
+            (_, ex) => errors.Add(ex));
+        pipeline.Start();
+        await pipeline.Writer.WriteAsync(Reading("pump-1", 1));
+        await pipeline.Writer.WriteAsync(Reading("pump-1", 2));
+
+        await pipeline.StopAsync().WaitAsync(Timeout);
+
+        Assert.IsType<OperationCanceledException>(Assert.Single(errors));
+        Assert.Equal([1L, 2], recorder.Readings.Select(r => r.SequenceNumber));
+    }
+
+    [Fact]
+    public async Task DisposeAsync_DrainsQueuedReadings()
+    {
+        var recorder = new RecordingHandler();
+        var pipeline = new TelemetryPipeline([recorder], FailOnHandlerError);
+        pipeline.Start();
+        for (long seq = 1; seq <= 3; seq++)
+        {
+            await pipeline.Writer.WriteAsync(Reading("pump-1", seq));
+        }
+
+        await pipeline.DisposeAsync().AsTask().WaitAsync(Timeout);
+
+        Assert.Equal([1L, 2, 3], recorder.Readings.Select(r => r.SequenceNumber));
+        Assert.False(pipeline.Writer.TryWrite(Reading("pump-1", 4)));
+    }
+
+    [Fact]
+    public async Task StopAsync_BeforeStart_ClosesTheWriter_AndCanBeRepeated()
+    {
+        var recorder = new RecordingHandler();
+        await using var pipeline = new TelemetryPipeline([recorder], FailOnHandlerError);
+
+        await pipeline.StopAsync().WaitAsync(Timeout);
+        await pipeline.StopAsync().WaitAsync(Timeout);
+
+        Assert.False(pipeline.Writer.TryWrite(Reading("pump-1", 1)));
+        Assert.Empty(recorder.Readings);
+    }
+
+    [Fact]
+    public void Constructor_ValidatesArguments()
+    {
+        Assert.Throws<ArgumentNullException>(() => new TelemetryPipeline(null!, FailOnHandlerError));
+        Assert.Throws<ArgumentNullException>(() => new TelemetryPipeline([], null!));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TelemetryPipeline([], FailOnHandlerError, capacity: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TelemetryPipeline([], FailOnHandlerError, capacity: -1));
     }
 
     [Fact]

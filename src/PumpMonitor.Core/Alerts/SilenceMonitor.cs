@@ -15,6 +15,11 @@ namespace PumpMonitor.Core.Alerts;
 /// the devices' threads and checks from the timer, so per-device state is shared under a lock.
 /// </para>
 /// <para>
+/// Quiet time is measured with <see cref="TimeProvider.GetTimestamp"/>, which is monotonic, not the wall clock:
+/// a system clock change (an NTP correction, a manual change) must neither flag every device as silent nor
+/// hide a device that really has gone quiet.
+/// </para>
+/// <para>
 /// Alerts once per silent period and re-arms when the device is heard from again.
 /// </para>
 /// </remarks>
@@ -48,7 +53,7 @@ public sealed class SilenceMonitor
         _timeout = options.SilenceTimeout;
         _timeProvider = timeProvider ?? TimeProvider.System;
 
-        DateTimeOffset now = _timeProvider.GetUtcNow();
+        long now = _timeProvider.GetTimestamp();
         foreach (string deviceId in expectedDeviceIds ?? [])
         {
             _devices[deviceId] = new DeviceState(now);
@@ -73,13 +78,14 @@ public sealed class SilenceMonitor
     public void CheckForSilentDevices()
     {
         DateTimeOffset now = _timeProvider.GetUtcNow();
+        long timestamp = _timeProvider.GetTimestamp();
         List<Alert> alerts = [];
 
         lock (_gate)
         {
             foreach ((string deviceId, DeviceState state) in _devices)
             {
-                TimeSpan quiet = now - state.LastSeen;
+                TimeSpan quiet = _timeProvider.GetElapsedTime(state.LastSeen, timestamp);
                 if (!state.Silent && quiet > _timeout)
                 {
                     state.Silent = true;
@@ -121,7 +127,7 @@ public sealed class SilenceMonitor
 
     private void HeardFrom(string deviceId)
     {
-        DateTimeOffset now = _timeProvider.GetUtcNow();
+        long now = _timeProvider.GetTimestamp();
         lock (_gate)
         {
             if (_devices.TryGetValue(deviceId, out DeviceState? state))
@@ -172,9 +178,10 @@ public sealed class SilenceMonitor
         }
     }
 
-    private sealed class DeviceState(DateTimeOffset lastSeen)
+    private sealed class DeviceState(long lastSeen)
     {
-        public DateTimeOffset LastSeen = lastSeen;
+        /// <summary>When the device was last heard from, as a <see cref="TimeProvider.GetTimestamp"/> value.</summary>
+        public long LastSeen = lastSeen;
         public bool Silent;
     }
 

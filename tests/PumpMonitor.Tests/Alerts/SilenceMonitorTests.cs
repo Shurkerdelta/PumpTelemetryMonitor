@@ -63,6 +63,68 @@ public class SilenceMonitorTests
         Assert.Equal([AlertType.DeviceSilent, AlertType.DeviceSilent], Types());
     }
 
+    [Theory]
+    [InlineData(60)]  // stepped forward: must not flag a device that just reported
+    [InlineData(-60)] // stepped back: must not hide a device that has gone quiet
+    public void WallClockSteps_NeitherFakeNorHideSilence(int clockStepSeconds)
+    {
+        var clock = new ClockStepTimeProvider(_time);
+        var monitor = new SilenceMonitor(_alerts.Enqueue, new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(5) }, timeProvider: clock);
+        ChannelWriter<TelemetryReading> writer = monitor.Track(_queue.Writer);
+        Send(writer);
+
+        clock.WallClockOffset = TimeSpan.FromSeconds(clockStepSeconds);
+        _time.Advance(TimeSpan.FromSeconds(1));
+        monitor.CheckForSilentDevices();
+        Assert.Empty(_alerts);
+
+        _time.Advance(TimeSpan.FromSeconds(5));
+        monitor.CheckForSilentDevices();
+
+        // Quiet time is real elapsed time; the alert is still stamped with the (stepped) wall clock.
+        Alert alert = Assert.Single(_alerts);
+        Assert.Equal(
+            new Alert("pump-1", AlertType.DeviceSilent, $"No readings for {6.0:F1}s (limit {5.0:F1}s)", clock.GetUtcNow()),
+            alert);
+    }
+
+    [Fact]
+    public async Task TrackedWriter_ForwardsCompletion_AndRejectedReadingsDoNotCountAsHeardFrom()
+    {
+        SilenceMonitor monitor = CreateMonitor(expected: ["pump-1"]);
+        ChannelWriter<TelemetryReading> writer = monitor.Track(_queue.Writer);
+
+        Assert.True(writer.TryComplete());
+        Assert.True(_queue.Reader.Completion.IsCompleted);
+
+        _time.Advance(TimeSpan.FromSeconds(3));
+        var reading = new TelemetryReading("pump-1", DateTimeOffset.UnixEpoch, 50, 60, 1);
+        Assert.False(writer.TryWrite(reading));
+        await Assert.ThrowsAsync<ChannelClosedException>(() => writer.WriteAsync(reading).AsTask());
+        Assert.False(await writer.WaitToWriteAsync());
+
+        // The device's readings never got through, so 6s after the start it is silent.
+        _time.Advance(TimeSpan.FromSeconds(3));
+        monitor.CheckForSilentDevices();
+        Assert.Equal([AlertType.DeviceSilent], Types());
+    }
+
+    [Fact]
+    public async Task NullArguments_AreRejected()
+    {
+        SilenceMonitor monitor = CreateMonitor();
+
+        Assert.Throws<ArgumentNullException>(() => new SilenceMonitor(null!));
+        Assert.Throws<ArgumentNullException>(() => monitor.Track(null!));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => monitor.RunAsync(CheckInterval, null!, CancellationToken.None));
+    }
+
+    [Fact]
+    public void InvalidOptions_AreRejected()
+    {
+        Assert.Throws<ArgumentException>(() => new SilenceMonitor(_alerts.Enqueue, new AlertOptions { SilenceTimeout = TimeSpan.Zero }));
+    }
+
     [Fact]
     public void ReadingsStuckInTheQueue_StillCountAsHeardFrom()
     {
@@ -142,6 +204,33 @@ public class SilenceMonitorTests
         await watch.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.IsType<IOException>(Assert.Single(Assert.IsType<AggregateException>(Assert.Single(errors)).InnerExceptions));
         Assert.Equal([AlertType.DeviceSilent], Types());
+        Assert.Equal(TaskStatus.RanToCompletion, watch.Status);
+    }
+
+    [Fact]
+    public async Task RunAsync_KeepsCheckingWhenTheErrorCallbackThrowsToo()
+    {
+        int failures = 0;
+        SilenceMonitor monitor = CreateMonitor(expected: ["pump-1"], onAlert: _ => throw new IOException("console write failed"));
+        ChannelWriter<TelemetryReading> writer = monitor.Track(_queue.Writer);
+        using var cts = new CancellationTokenSource();
+        Task watch = monitor.RunAsync(
+            CheckInterval,
+            _ =>
+            {
+                Interlocked.Increment(ref failures);
+                throw new IOException("stderr is gone too");
+            },
+            cts.Token);
+
+        await AdvanceUntilAsync(() => Volatile.Read(ref failures) == 1);
+
+        // A second silent period is only noticed if the watch survived the throwing error callback.
+        Send(writer);
+        await AdvanceUntilAsync(() => Volatile.Read(ref failures) == 2);
+
+        cts.Cancel();
+        await watch.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(TaskStatus.RanToCompletion, watch.Status);
     }
 

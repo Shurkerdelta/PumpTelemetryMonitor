@@ -51,7 +51,8 @@ public sealed class DeviceCommandHandler
 
     public CommandResult Execute(string? input)
     {
-        string[] parts = (input ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // Split on any whitespace, not just spaces: piped or scripted input may separate arguments with tabs.
+        string[] parts = (input ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0)
         {
             return new CommandResult("");

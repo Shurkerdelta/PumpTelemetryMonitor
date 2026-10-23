@@ -10,9 +10,16 @@ namespace PumpMonitor.Core.Devices;
 /// come from an <see cref="IPumpProcess"/>, which tests can replace with a stub.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Turning the pump off does not silence the device: its sensors keep reporting while
 /// pressure and temperature fall back to idle. <see cref="TurnOn"/> and <see cref="TurnOff"/>
 /// are safe to call from any thread while <see cref="RunAsync"/> is executing.
+/// </para>
+/// <para>
+/// Only reading timestamps come from the wall clock. Durations (the time between readings fed to the
+/// process, how long a fault lasts) use the monotonic <see cref="TimeProvider.GetTimestamp"/>, so a system
+/// clock change can't fake a burst of noise, cut a fault short or stretch one out.
+/// </para>
 /// </remarks>
 public sealed class SimulatedDevice
 {
@@ -22,15 +29,15 @@ public sealed class SimulatedDevice
     private readonly Random _random;
     private volatile bool _isOn;
     private long _sequenceNumber;
-    private DateTimeOffset? _lastReadingAt;
+    private long? _lastReadingTimestamp;
 
     // Fault state is set from the command thread and read by the run loop, so it's guarded by a lock.
     private readonly Lock _faultGate = new();
-    private DateTimeOffset _spikeUntil = DateTimeOffset.MinValue;
+    private FaultWindow? _spike;
     private double _spikeThreshold;
-    private DateTimeOffset _overheatUntil = DateTimeOffset.MinValue;
+    private FaultWindow? _overheat;
     private double _overheatThreshold;
-    private DateTimeOffset _silentUntil = DateTimeOffset.MinValue;
+    private FaultWindow? _silence;
     private bool _reorderPending;
 
     public SimulatedDevice(
@@ -84,21 +91,21 @@ public sealed class SimulatedDevice
     public void InjectFault(DeviceFault fault, AlertOptions? limits = null)
     {
         limits ??= new AlertOptions();
-        DateTimeOffset now = _timeProvider.GetUtcNow();
+        long now = _timeProvider.GetTimestamp();
         lock (_faultGate)
         {
             switch (fault)
             {
                 case DeviceFault.PressureSpike:
-                    _spikeUntil = now + _options.FaultDuration;
+                    _spike = new FaultWindow(now, _options.FaultDuration);
                     _spikeThreshold = limits.PressureThreshold;
                     break;
                 case DeviceFault.Overheat:
-                    _overheatUntil = now + _options.FaultDuration;
+                    _overheat = new FaultWindow(now, _options.FaultDuration);
                     _overheatThreshold = limits.TemperatureThreshold;
                     break;
                 case DeviceFault.Silence:
-                    _silentUntil = now + limits.SilenceTimeout + _options.FaultSilenceMargin;
+                    _silence = new FaultWindow(now, limits.SilenceTimeout + _options.FaultSilenceMargin);
                     break;
                 case DeviceFault.Reorder:
                     _reorderPending = true;
@@ -117,20 +124,21 @@ public sealed class SimulatedDevice
     public TelemetryReading TakeReading()
     {
         DateTimeOffset now = _timeProvider.GetUtcNow();
-        TimeSpan elapsed = _lastReadingAt is { } last ? now - last : TimeSpan.Zero;
-        _lastReadingAt = now;
+        long timestamp = _timeProvider.GetTimestamp();
+        TimeSpan elapsed = _lastReadingTimestamp is { } last ? _timeProvider.GetElapsedTime(last, timestamp) : TimeSpan.Zero;
+        _lastReadingTimestamp = timestamp;
 
         ProcessState state = _process.Next(_isOn, elapsed);
         double pressure = state.Pressure;
         double temperature = state.Temperature;
         lock (_faultGate)
         {
-            if (now < _spikeUntil)
+            if (IsActive(_spike, timestamp))
             {
                 pressure = Math.Max(pressure, _spikeThreshold) + _options.FaultPressureMargin;
             }
 
-            if (now < _overheatUntil)
+            if (IsActive(_overheat, timestamp))
             {
                 temperature = Math.Max(temperature, _overheatThreshold) + _options.FaultTemperatureMargin;
             }
@@ -186,12 +194,15 @@ public sealed class SimulatedDevice
 
     private bool IsSilent()
     {
-        DateTimeOffset now = _timeProvider.GetUtcNow();
+        long now = _timeProvider.GetTimestamp();
         lock (_faultGate)
         {
-            return now < _silentUntil;
+            return IsActive(_silence, now);
         }
     }
+
+    private bool IsActive(FaultWindow? window, long now) =>
+        window is { } w && _timeProvider.GetElapsedTime(w.Start, now) < w.Duration;
 
     private bool TryStartReorder()
     {
@@ -208,4 +219,7 @@ public sealed class SimulatedDevice
         TimeSpan range = _options.MaxInterval - _options.MinInterval;
         return _options.MinInterval + (range * _random.NextDouble());
     }
+
+    /// <summary>A timed fault: when it started (a <see cref="TimeProvider.GetTimestamp"/> value) and how long it lasts.</summary>
+    private readonly record struct FaultWindow(long Start, TimeSpan Duration);
 }
