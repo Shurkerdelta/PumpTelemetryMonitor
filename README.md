@@ -5,7 +5,7 @@ processing pipeline and prints alerts for high pressure, out-of-order readings, 
 Tests run in GitHub Actions on Ubuntu and Windows.
 
 ```bash
-dotnet run --project src/PumpMonitor.App -- --show-readings
+dotnet run --project src/PumpMonitor.App
 dotnet test
 ```
 
