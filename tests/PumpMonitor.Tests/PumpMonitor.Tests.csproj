@@ -21,6 +21,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PumpMonitor.Core\PumpMonitor.Core.csproj" />
+    <!-- Built alongside the tests so the smoke tests can launch the real console app. -->
+    <ProjectReference Include="..\..\src\PumpMonitor.App\PumpMonitor.App.csproj" />
   </ItemGroup>
 
 </Project>

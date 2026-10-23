@@ -69,20 +69,60 @@ public class SilenceMonitorTests
     [InlineData(-3600)] // stepping back an hour must not hide the silence that follows
     public void SystemClockStep_DoesNotChangeMeasuredSilence(int stepSeconds)
     {
-        var clock = new SteppableWallClock(_time);
+        var clock = new ClockStepTimeProvider(_time);
         SilenceMonitor monitor = CreateMonitor(clock: clock);
         ChannelWriter<TelemetryReading> writer = monitor.Track(_queue.Writer);
         Send(writer);
 
         _time.Advance(TimeSpan.FromSeconds(1));
-        clock.Step = TimeSpan.FromSeconds(stepSeconds);
+        clock.WallClockOffset = TimeSpan.FromSeconds(stepSeconds);
         monitor.CheckForSilentDevices();
         Assert.Empty(_alerts);
 
         _time.Advance(TimeSpan.FromSeconds(4.1));
         monitor.CheckForSilentDevices();
+
+        // Quiet time is real elapsed time; the alert is still stamped with the (stepped) wall clock.
         Alert alert = Assert.Single(_alerts);
         Assert.Equal($"No readings for {5.1:F1}s (limit {5.0:F1}s)", alert.Message);
+        Assert.Equal(clock.GetUtcNow(), alert.Timestamp);
+    }
+
+    [Fact]
+    public async Task TrackedWriter_ForwardsCompletion_AndRejectedReadingsDoNotCountAsHeardFrom()
+    {
+        SilenceMonitor monitor = CreateMonitor(expected: ["pump-1"]);
+        ChannelWriter<TelemetryReading> writer = monitor.Track(_queue.Writer);
+
+        Assert.True(writer.TryComplete());
+        Assert.True(_queue.Reader.Completion.IsCompleted);
+
+        _time.Advance(TimeSpan.FromSeconds(3));
+        var reading = new TelemetryReading("pump-1", DateTimeOffset.UnixEpoch, 50, 60, 1);
+        Assert.False(writer.TryWrite(reading));
+        await Assert.ThrowsAsync<ChannelClosedException>(() => writer.WriteAsync(reading).AsTask());
+        Assert.False(await writer.WaitToWriteAsync());
+
+        // The device's readings never got through, so 6s after the start it is silent.
+        _time.Advance(TimeSpan.FromSeconds(3));
+        monitor.CheckForSilentDevices();
+        Assert.Equal([AlertType.DeviceSilent], Types());
+    }
+
+    [Fact]
+    public async Task NullArguments_AreRejected()
+    {
+        SilenceMonitor monitor = CreateMonitor();
+
+        Assert.Throws<ArgumentNullException>(() => new SilenceMonitor(null!));
+        Assert.Throws<ArgumentNullException>(() => monitor.Track(null!));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => monitor.RunAsync(CheckInterval, null!, CancellationToken.None));
+    }
+
+    [Fact]
+    public void InvalidOptions_AreRejected()
+    {
+        Assert.Throws<ArgumentException>(() => new SilenceMonitor(_alerts.Enqueue, new AlertOptions { SilenceTimeout = TimeSpan.Zero }));
     }
 
     [Fact]
@@ -168,6 +208,33 @@ public class SilenceMonitorTests
     }
 
     [Fact]
+    public async Task RunAsync_KeepsCheckingWhenTheErrorCallbackThrowsToo()
+    {
+        int failures = 0;
+        SilenceMonitor monitor = CreateMonitor(expected: ["pump-1"], onAlert: _ => throw new IOException("console write failed"));
+        ChannelWriter<TelemetryReading> writer = monitor.Track(_queue.Writer);
+        using var cts = new CancellationTokenSource();
+        Task watch = monitor.RunAsync(
+            CheckInterval,
+            _ =>
+            {
+                Interlocked.Increment(ref failures);
+                throw new IOException("stderr is gone too");
+            },
+            cts.Token);
+
+        await AdvanceUntilAsync(() => Volatile.Read(ref failures) == 1);
+
+        // A second silent period is only noticed if the watch survived the throwing error callback.
+        Send(writer);
+        await AdvanceUntilAsync(() => Volatile.Read(ref failures) == 2);
+
+        cts.Cancel();
+        await watch.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(TaskStatus.RanToCompletion, watch.Status);
+    }
+
+    [Fact]
     public async Task RunAsync_RaisesAlertFromTimerWhileReadingsArriveConcurrently()
     {
         var errors = new ConcurrentQueue<Exception>();
@@ -196,20 +263,5 @@ public class SilenceMonitorTests
         Assert.Equal(("pump-2", AlertType.DeviceSilent), (alert.DeviceId, alert.Type));
         Assert.Equal(TaskStatus.RanToCompletion, watch.Status);
         Assert.Empty(errors);
-    }
-
-    /// <summary>
-    /// Keeps <paramref name="steady"/>'s monotonic timestamps but reports a wall clock that can be stepped on its own,
-    /// like a system clock corrected by NTP or changed by hand.
-    /// </summary>
-    private sealed class SteppableWallClock(FakeTimeProvider steady) : TimeProvider
-    {
-        public TimeSpan Step { get; set; }
-
-        public override DateTimeOffset GetUtcNow() => steady.GetUtcNow() + Step;
-
-        public override long GetTimestamp() => steady.GetTimestamp();
-
-        public override long TimestampFrequency => steady.TimestampFrequency;
     }
 }

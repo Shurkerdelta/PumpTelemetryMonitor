@@ -28,8 +28,8 @@ internal sealed class ConsoleUi
     public void WriteError(string text) => Write(Console.Error, text);
 
     /// <summary>
-    /// Blocks until the operator presses Enter and returns the line, or null if input has ended.
-    /// Call from one thread at a time.
+    /// Blocks until the operator presses Enter and returns the line, or null if input has ended
+    /// (including after <see cref="Close"/>). Call from one thread at a time.
     /// </summary>
     public string? ReadLine()
     {
@@ -40,6 +40,11 @@ internal sealed class ConsoleUi
 
         lock (_gate)
         {
+            if (_closed)
+            {
+                return null;
+            }
+
             // The previous Enter (or a log line since) may have left a prompt drawn; replace it, don't append.
             ClearPromptLine();
             DrawPrompt();
@@ -51,6 +56,13 @@ internal sealed class ConsoleUi
             ConsoleKeyInfo key = Console.ReadKey(intercept: true);
             lock (_gate)
             {
+                // A read abandoned at shutdown (e.g. Ctrl+C) can still get a key; redrawing the prompt then would
+                // splice it into the plain shutdown output that follows.
+                if (_closed)
+                {
+                    return null;
+                }
+
                 switch (key.Key)
                 {
                     case ConsoleKey.Enter:
