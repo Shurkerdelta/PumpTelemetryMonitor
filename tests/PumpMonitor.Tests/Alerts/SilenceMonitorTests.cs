@@ -18,8 +18,9 @@ public class SilenceMonitorTests
     // Nothing reads this channel, so readings pile up as if the pipeline's consumer had stalled.
     private readonly Channel<TelemetryReading> _queue = Channel.CreateUnbounded<TelemetryReading>();
 
-    private SilenceMonitor CreateMonitor(IEnumerable<string>? expected = null, Action<Alert>? onAlert = null) =>
-        new(onAlert ?? _alerts.Enqueue, new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(5) }, expected, _time);
+    private SilenceMonitor CreateMonitor(
+        IEnumerable<string>? expected = null, Action<Alert>? onAlert = null, TimeProvider? clock = null) =>
+        new(onAlert ?? _alerts.Enqueue, new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(5) }, expected, clock ?? _time);
 
     private static void Send(ChannelWriter<TelemetryReading> writer, string deviceId = "pump-1") =>
         Assert.True(writer.TryWrite(new TelemetryReading(deviceId, DateTimeOffset.UnixEpoch, 50, 60, 1)));
@@ -61,6 +62,27 @@ public class SilenceMonitorTests
         _time.Advance(TimeSpan.FromSeconds(6));
         monitor.CheckForSilentDevices();
         Assert.Equal([AlertType.DeviceSilent, AlertType.DeviceSilent], Types());
+    }
+
+    [Theory]
+    [InlineData(3600)]  // stepping forward an hour must not report the device silent
+    [InlineData(-3600)] // stepping back an hour must not hide the silence that follows
+    public void SystemClockStep_DoesNotChangeMeasuredSilence(int stepSeconds)
+    {
+        var clock = new SteppableWallClock(_time);
+        SilenceMonitor monitor = CreateMonitor(clock: clock);
+        ChannelWriter<TelemetryReading> writer = monitor.Track(_queue.Writer);
+        Send(writer);
+
+        _time.Advance(TimeSpan.FromSeconds(1));
+        clock.Step = TimeSpan.FromSeconds(stepSeconds);
+        monitor.CheckForSilentDevices();
+        Assert.Empty(_alerts);
+
+        _time.Advance(TimeSpan.FromSeconds(4.1));
+        monitor.CheckForSilentDevices();
+        Alert alert = Assert.Single(_alerts);
+        Assert.Equal($"No readings for {5.1:F1}s (limit {5.0:F1}s)", alert.Message);
     }
 
     [Fact]
@@ -174,5 +196,20 @@ public class SilenceMonitorTests
         Assert.Equal(("pump-2", AlertType.DeviceSilent), (alert.DeviceId, alert.Type));
         Assert.Equal(TaskStatus.RanToCompletion, watch.Status);
         Assert.Empty(errors);
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="steady"/>'s monotonic timestamps but reports a wall clock that can be stepped on its own,
+    /// like a system clock corrected by NTP or changed by hand.
+    /// </summary>
+    private sealed class SteppableWallClock(FakeTimeProvider steady) : TimeProvider
+    {
+        public TimeSpan Step { get; set; }
+
+        public override DateTimeOffset GetUtcNow() => steady.GetUtcNow() + Step;
+
+        public override long GetTimestamp() => steady.GetTimestamp();
+
+        public override long TimestampFrequency => steady.TimestampFrequency;
     }
 }

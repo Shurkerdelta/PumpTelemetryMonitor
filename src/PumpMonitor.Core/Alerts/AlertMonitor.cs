@@ -9,7 +9,8 @@ namespace PumpMonitor.Core.Alerts;
 /// <remarks>
 /// <para>
 /// High pressure and high temperature alert on every reading above the threshold, so consecutive high
-/// readings each raise an alert. Out-of-order alerts fire per offending reading.
+/// readings each raise an alert. Out-of-order alerts fire per offending reading. A reading can raise several
+/// alerts; all of them are delivered even if the callback throws for one.
 /// </para>
 /// <para>
 /// A device that stops reporting sends no readings to check, so silence is detected separately by
@@ -39,14 +40,16 @@ public sealed class AlertMonitor : ITelemetryHandler
 
     public AlertOptions Options { get; }
 
+    /// <exception cref="AggregateException">The alert callback threw. Every other alert was still delivered.</exception>
     public ValueTask HandleAsync(TelemetryReading reading, CancellationToken cancellationToken)
     {
         DateTimeOffset now = _timeProvider.GetUtcNow();
+        List<Alert> alerts = [];
 
         long lastSequence = _lastSequence.GetValueOrDefault(reading.DeviceId);
         if (reading.SequenceNumber <= lastSequence)
         {
-            _onAlert(new Alert(reading.DeviceId, AlertType.OutOfOrderSequence,
+            alerts.Add(new Alert(reading.DeviceId, AlertType.OutOfOrderSequence,
                 $"Sequence #{reading.SequenceNumber} arrived after #{lastSequence}", now));
         }
         else
@@ -56,16 +59,18 @@ public sealed class AlertMonitor : ITelemetryHandler
 
         if (reading.Pressure > Options.PressureThreshold)
         {
-            _onAlert(new Alert(reading.DeviceId, AlertType.HighPressure,
+            alerts.Add(new Alert(reading.DeviceId, AlertType.HighPressure,
                 $"Pressure {reading.Pressure:F2} MPa exceeds {Options.PressureThreshold:F2} MPa", now));
         }
 
         if (reading.Temperature > Options.TemperatureThreshold)
         {
-            _onAlert(new Alert(reading.DeviceId, AlertType.HighTemperature,
+            alerts.Add(new Alert(reading.DeviceId, AlertType.HighTemperature,
                 $"Temperature {reading.Temperature:F1} °C exceeds {Options.TemperatureThreshold:F1} °C", now));
         }
 
+        // The reading is gone once this returns, so an alert skipped because an earlier one threw would never be raised.
+        AlertDelivery.DeliverAll(_onAlert, alerts);
         return ValueTask.CompletedTask;
     }
 }
