@@ -1,8 +1,8 @@
 # Pump Telemetry Monitor
 
 A .NET 10 console app that simulates a small fleet of frac pumps, streams their telemetry through a processing
-pipeline, and raises alerts. This document explains how the **simulated telemetry** and **alert detection**
-parts are implemented.
+pipeline, and raises alerts. This document explains how the **simulated telemetry**, **concurrent processing**
+and **alert detection** parts are implemented.
 
 ## Requirement
 
@@ -66,6 +66,8 @@ pump-n ─┘
 - A single consumer runs the handlers, so readings are processed in arrival order and handlers need no locks.
 - On shutdown, the producers are cancelled first and then the pipeline drains what is already queued.
 
+[Concurrent processing](#concurrent-processing) explains how the pipeline does this.
+
 Each device loop is:
 
 1. Read the clock once (`now`).
@@ -123,6 +125,108 @@ replace the model with `StubPumpProcess` through the `IPumpProcess` interface.
 Faults are sized from the current alert thresholds, so each one is guaranteed to trigger its alert. Silence and
 reorder deliberately break the normal cadence and order. Without them, every device reports in order every
 100–500 ms.
+
+## Concurrent processing
+
+### Requirement
+
+A processing pipeline receives telemetry from all devices concurrently, processes readings without blocking the
+devices that produce them, and shuts down gracefully. It is built from .NET concurrency primitives.
+
+### Where the code lives
+
+| Piece | File | Role |
+|---|---|---|
+| Pipeline | [TelemetryPipeline.cs](src/PumpMonitor.Core/Processing/TelemetryPipeline.cs) | Bounded channel, single consumer, drain on stop |
+| Handler | [ITelemetryHandler.cs](src/PumpMonitor.Core/Processing/ITelemetryHandler.cs) | One processing step, run for every reading |
+| Handlers in use | [ConsoleLogHandler.cs](src/PumpMonitor.App/ConsoleLogHandler.cs), [AlertMonitor.cs](src/PumpMonitor.Core/Alerts/AlertMonitor.cs) | Print the reading; check it for alerts |
+| Console | [ConsoleUi.cs](src/PumpMonitor.App/ConsoleUi.cs) | Serialises output from every thread under one lock |
+| Wiring and shutdown | [Program.cs](src/PumpMonitor.App/Program.cs) | Starts the producers and the consumer, and stops them in order |
+
+### What runs at the same time
+
+| Task | Started by | Does |
+|---|---|---|
+| One producer per device | `RunDeviceAsync` → `SimulatedDevice.RunAsync` | Takes readings and writes them to the pipeline |
+| The consumer | `TelemetryPipeline.Start` (`Task.Run`) | Reads the queue and runs each handler in turn |
+| The silence watch | `SilenceMonitor.RunAsync` | Checks for quiet devices every 500 ms |
+| The command loop | `ReadCommandsAsync` | Reads operator input and applies commands to the devices |
+
+All of them are async tasks on the thread pool, so none needs a thread of its own while it waits. The one
+exception is the command loop's blocking `ReadLine`, which holds a pool thread until the operator presses Enter.
+
+### .NET primitives used
+
+| Primitive | Where | Why |
+|---|---|---|
+| `Channel<T>` (`Channel.CreateBounded`) | `TelemetryPipeline` | Thread-safe queue from many producers to one consumer, with a built-in policy for when it is full |
+| `Task`, `Task.Run`, `async`/`await` | Producers, consumer, silence watch, command loop | Run concurrently without blocking a thread while waiting |
+| `CancellationTokenSource` / `CancellationToken` | `Program.cs`, `TelemetryPipeline` | Stop the devices and the silence watch; put a time limit on the drain; abandon processing when it runs out |
+| `Task.WhenAll` / `Task.WhenAny` | `Program.cs` | Wait for every producer before closing the queue; race blocking console input against shutdown |
+| `Lock` (`System.Threading.Lock`) | `TelemetryPipeline` start/stop, `SilenceMonitor`, `SimulatedDevice` faults, `ConsoleUi` | Guard state that more than one thread reads and writes |
+| `Interlocked` | `TelemetryPipeline.DroppedCount` | Count dropped readings without a lock |
+| `volatile` | `SimulatedDevice` on/off state, `Toggle` | Flags set by the command loop and read by the devices or the consumer |
+| `PeriodicTimer` | `SilenceMonitor.RunAsync` | Silence check every 500 ms. The next wait starts only after a check returns, so checks never overlap |
+
+### Receiving concurrently
+
+- **One writer for everyone:** every device writes to `TelemetryPipeline.Writer` at the same time, and the
+  channel handles the concurrent writes with no locking in the devices. Readings from one device stay in the
+  order that device wrote them.
+- **Producers can't close it:** devices get a wrapper (`ProducerWriter`) that refuses to complete the queue:
+  `TryComplete` returns false and `Complete` throws. Only `StopAsync` closes it, so one device can't cut off the
+  others, or complete the queue with an error that would crash the consumer before the drain.
+- **Exactly one consumer:** `Start` checks and starts under a lock, so even concurrent calls start a single
+  consumer. Readings written before `Start` are queued, not lost.
+
+### Never blocking producers
+
+- **Bounded, drop oldest:** the queue holds 100 readings, 6–10 s of telemetry at normal rates. When it is full,
+  a write still succeeds immediately and the oldest queued reading is dropped instead. Devices never wait on
+  processing, and memory stays bounded. `DroppedCount` records how many were dropped, and the app prints it at
+  shutdown.
+- **Handlers never run on a producer's thread:** a write that wakes the idle consumer only schedules it on the
+  thread pool (`AllowSynchronousContinuations = false`). Otherwise the device's own thread would run every
+  handler, and would block on a slow console write.
+- **Short locks on the write path:** the only lock a write takes is `SilenceMonitor`'s, held just long enough to
+  record when the device was last heard from. Alerts and console output happen outside it.
+
+### One consumer
+
+- **Arrival order:** the consumer processes one reading at a time, in the order they were queued. So handlers
+  need no locks: `AlertMonitor` keeps each device's last sequence number in a plain `Dictionary`.
+- **Failures are contained:** a handler that throws is reported through the pipeline's error callback, and
+  processing carries on with the next handler and reading. An exception from the error callback itself is
+  swallowed, because a dead consumer would leave the queue unread until shutdown.
+- **Cancellation:** handlers get a cancellation token, which fires only if the shutdown drain runs out of time.
+
+### Graceful shutdown
+
+`quit`, the end of input, and the first Ctrl+C all run the same sequence in `Program.cs`:
+
+1. **Clear the prompt:** `ui.Close()` removes the input prompt, so final messages print as plain lines.
+2. **Stop the producers:** cancelling the shutdown token ends every device loop and the silence watch. For them
+   cancellation is a normal exit, not an error.
+3. **Wait for them:** `Task.WhenAll` waits until no producer can write again. `RunDeviceAsync` reports a device
+   that crashed and keeps its exception out of this wait, which would otherwise skip the drain.
+4. **Drain:** `pipeline.StopAsync` closes the queue, so any further write fails, and waits while the consumer
+   processes everything still queued.
+5. **Time limit:** the drain gets 5 s. If it runs out, the in-flight handler's token is cancelled, no further
+   handlers run, and the rest of the queue is discarded.
+6. **Report:** the number of dropped readings, if any, then "All devices stopped."
+
+Supporting details:
+
+- **Input doesn't hold up shutdown:** `ReadLine` can't be cancelled, so the command loop runs it with `Task.Run`
+  and races it against shutdown with `Task.WhenAny`. Ctrl+C doesn't wait for a line of input.
+- **Ctrl+C:** the handler sets `e.Cancel = true` so the first press runs this sequence instead of killing the
+  process. Once shutdown has started, Ctrl+C kills the process as usual, in case something hangs.
+- **Safe to stop twice:** the pipeline is declared with `await using`, and `StopAsync` can be called more than
+  once, so disposing it after the drain does nothing.
+
+Known limit: `StopAsync` still waits for the in-flight handler to return. A handler that ignores its token (for
+example a console write blocked by a paused terminal) can hold shutdown past the 5 s limit. A second Ctrl+C ends
+the process.
 
 ## Alert detection
 
@@ -233,6 +337,18 @@ The relevant tests are in [tests/PumpMonitor.Tests/Devices](tests/PumpMonitor.Te
 - that delivery time comes out of the wait
 - contiguous, ordered sequence numbers from concurrent devices sharing a channel
 - the 3–5 device count and the `pump-n` naming
+
+The pipeline tests are in [tests/PumpMonitor.Tests/Processing](tests/PumpMonitor.Tests/Processing). They cover:
+
+- four concurrent producers, with every reading delivered in per-device order
+- writes that complete immediately while a handler is stalled, with the oldest readings dropped and counted
+- a handler that blocks its thread never running on the producer's thread
+- concurrent `Start` calls starting exactly one consumer
+- producers that can't complete the pipeline
+- `StopAsync` draining queued readings and rejecting new ones
+- a drain that runs out of time abandoning the rest, even when a handler ignores cancellation
+- a throwing handler or error callback that doesn't stop processing
+- readings written before `Start` still being processed
 
 The alert tests are in [tests/PumpMonitor.Tests/Alerts](tests/PumpMonitor.Tests/Alerts). They cover:
 
