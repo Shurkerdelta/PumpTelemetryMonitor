@@ -93,49 +93,26 @@ public class DeviceCommandHandlerTests
 
         Assert.Contains("pump-1: ON", status);
         Assert.Contains("pump-3: OFF", status);
+        Assert.DoesNotContain("Alert thresholds", status); // no alert options given
     }
 
     [Fact]
-    public void Threshold_UpdatesEachAlertThreshold()
+    public void Status_ShowsAlertThresholds()
     {
-        var alerts = new AlertMonitor(_ => { });
-        var handler = new DeviceCommandHandler(_devices, alerts);
+        var options = new AlertOptions
+        {
+            PressureThreshold = 50.5,
+            TemperatureThreshold = 80,
+            SilenceTimeout = TimeSpan.FromSeconds(2.5),
+        };
 
-        handler.Execute("threshold pressure 50.5");
-        handler.Execute("THRESHOLD temperature 80");
-        CommandResult result = handler.Execute("threshold silence 2.5");
+        string status = new DeviceCommandHandler(_devices, options).Execute("status").Message;
 
-        Assert.Equal(
-            (50.5, 80.0, TimeSpan.FromSeconds(2.5)),
-            (alerts.Options.PressureThreshold, alerts.Options.TemperatureThreshold, alerts.Options.SilenceTimeout));
-        Assert.Contains("50.50 MPa", result.Message);
-    }
-
-    [Theory]
-    [InlineData("threshold pressure")]
-    [InlineData("threshold pressure abc")]
-    [InlineData("threshold flow 10")]
-    [InlineData("threshold silence 0")]
-    [InlineData("threshold pressure NaN")]
-    public void Threshold_InvalidInput_ShowsUsageAndLeavesOptionsUnchanged(string command)
-    {
-        var alerts = new AlertMonitor(_ => { });
-        AlertOptions before = alerts.Options;
-
-        CommandResult result = new DeviceCommandHandler(_devices, alerts).Execute(command);
-
-        Assert.StartsWith("Usage:", result.Message);
-        Assert.Same(before, alerts.Options);
-    }
-
-    [Fact]
-    public void Threshold_WithoutArguments_ShowsCurrentValues_OrExplainsWhenAlertsAreOff()
-    {
-        var withAlerts = new DeviceCommandHandler(_devices, new AlertMonitor(_ => { }));
-
-        string defaultPressure = $"{new AlertOptions().PressureThreshold:F2} MPa";
-        Assert.Contains(defaultPressure, withAlerts.Execute("threshold").Message);
-        Assert.Equal("Alerts are not enabled.", CreateHandler().Execute("threshold").Message);
+        Assert.Contains("pump-1: ON", status);
+        Assert.Contains("Alert thresholds:", status);
+        Assert.Contains($"pressure:    {50.5:F2} MPa", status);
+        Assert.Contains($"temperature: {80.0:F1} °C", status);
+        Assert.Contains($"silence:     {2.5:F1} s", status);
     }
 
     [Fact]
@@ -185,13 +162,11 @@ public class DeviceCommandHandlerTests
     }
 
     [Fact]
-    public void Fault_AimsAtTheMonitorsCurrentThresholds()
+    public void Fault_AimsAtTheConfiguredThresholds()
     {
         var device = new SimulatedDevice("pump-1", new StubPumpProcess(new ProcessState(55, 70)), timeProvider: new FakeTimeProvider());
-        var alerts = new AlertMonitor(_ => { });
-        var handler = new DeviceCommandHandler([device], alerts);
+        var handler = new DeviceCommandHandler([device], new AlertOptions { TemperatureThreshold = 150 });
 
-        handler.Execute("threshold temperature 150");
         handler.Execute("fault overheat");
 
         Assert.Equal(150 + new SimulatedDeviceOptions().FaultTemperatureMargin, device.TakeReading().Temperature);

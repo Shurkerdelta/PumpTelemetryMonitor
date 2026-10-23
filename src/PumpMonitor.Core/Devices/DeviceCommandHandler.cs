@@ -1,5 +1,4 @@
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
 using PumpMonitor.Core.Alerts;
 
 namespace PumpMonitor.Core.Devices;
@@ -14,27 +13,26 @@ public sealed record CommandResult(string Message, bool ExitRequested = false);
 /// so it can be unit tested.
 /// </summary>
 /// <remarks>
-/// Commands (case-insensitive): <c>on [id...]</c>, <c>off [id...]</c>, <c>status</c>,
-/// <c>threshold [pressure|temperature|silence value]</c>, <c>readings [on|off]</c>,
-/// <c>fault spike|overheat|silence|reorder [id...]</c>, <c>help</c>,
-/// <c>quit</c>/<c>exit</c>. Omitting the ids applies on/off/fault to every device.
+/// Commands (case-insensitive): <c>on [id...]</c>, <c>off [id...]</c>, <c>status</c>, <c>readings [on|off]</c>,
+/// <c>fault spike|overheat|silence|reorder [id...]</c>, <c>help</c>, <c>quit</c>/<c>exit</c>.
+/// Omitting the ids applies on/off/fault to every device. Alert thresholds are fixed at startup; <c>status</c> shows them.
 /// </remarks>
 public sealed class DeviceCommandHandler
 {
     public const string HelpText =
-        "Commands: on [id...] | off [id...] | status | threshold [pressure|temperature|silence <value>] | " +
-        "readings [on|off] | fault <spike|overheat|silence|reorder> [id...] | help | quit   (omit ids to apply to all devices)";
+        "Commands: on [id...] | off [id...] | status | readings [on|off] | " +
+        "fault <spike|overheat|silence|reorder> [id...] | help | quit   (omit ids to apply to all devices)";
 
     private readonly Dictionary<string, SimulatedDevice> _devices = new(StringComparer.OrdinalIgnoreCase);
-    private readonly AlertMonitor? _alerts;
+    private readonly AlertOptions? _alertOptions;
     private readonly Toggle? _showReadings;
 
     /// <param name="devices">Devices that on/off/status/fault act on.</param>
-    /// <param name="alerts">Monitor whose thresholds the <c>threshold</c> command shows and adjusts, if any.</param>
+    /// <param name="alertOptions">Alert thresholds that <c>status</c> shows and faults are sized from, if alerts are enabled.</param>
     /// <param name="showReadings">Setting the <c>readings</c> command flips, if reading output can be toggled.</param>
-    public DeviceCommandHandler(IEnumerable<SimulatedDevice> devices, AlertMonitor? alerts = null, Toggle? showReadings = null)
+    public DeviceCommandHandler(IEnumerable<SimulatedDevice> devices, AlertOptions? alertOptions = null, Toggle? showReadings = null)
     {
-        _alerts = alerts;
+        _alertOptions = alertOptions;
         _showReadings = showReadings;
         foreach (SimulatedDevice device in devices)
         {
@@ -64,7 +62,6 @@ public sealed class DeviceCommandHandler
             "on" => Switch(deviceIds, on: true),
             "off" => Switch(deviceIds, on: false),
             "status" => new CommandResult(Status()),
-            "threshold" => Threshold(parts[1..]),
             "readings" => Readings(parts[1..]),
             "fault" => Fault(parts[1..]),
             "help" => new CommandResult(HelpText),
@@ -118,8 +115,8 @@ public sealed class DeviceCommandHandler
             return error;
         }
 
-        // Aim at the monitor's current thresholds (including any changed with 'threshold') so the fault always alerts.
-        AlertOptions limits = _alerts?.Options ?? new AlertOptions();
+        // Aim at the alert thresholds so the fault always alerts.
+        AlertOptions limits = _alertOptions ?? new AlertOptions();
         foreach (SimulatedDevice target in targets)
         {
             target.InjectFault(fault.Value, limits);
@@ -157,44 +154,6 @@ public sealed class DeviceCommandHandler
     private static string Describe(string[] deviceIds, SimulatedDevice[] targets) =>
         deviceIds.Length == 0 ? "all devices" : string.Join(", ", targets.Select(d => d.DeviceId));
 
-    private CommandResult Threshold(string[] args)
-    {
-        if (_alerts is null)
-        {
-            return new CommandResult("Alerts are not enabled.");
-        }
-
-        if (args.Length == 0)
-        {
-            return new CommandResult(DescribeThresholds(_alerts.Options));
-        }
-
-        const string usage = "Usage: threshold pressure <MPa> | threshold temperature <°C> | threshold silence <seconds>";
-        if (args.Length != 2
-            || !double.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
-            || !double.IsFinite(value))
-        {
-            return new CommandResult(usage);
-        }
-
-        AlertOptions current = _alerts.Options;
-        AlertOptions? updated = args[0].ToLowerInvariant() switch
-        {
-            "pressure" => current with { PressureThreshold = value },
-            "temperature" => current with { TemperatureThreshold = value },
-            "silence" when value > 0 => current with { SilenceTimeout = TimeSpan.FromSeconds(value) },
-            _ => null,
-        };
-
-        if (updated is null)
-        {
-            return new CommandResult(usage);
-        }
-
-        _alerts.Options = updated;
-        return new CommandResult($"Thresholds updated.{Environment.NewLine}{DescribeThresholds(updated)}");
-    }
-
     private CommandResult Readings(string[] args)
     {
         if (_showReadings is null)
@@ -226,6 +185,11 @@ public sealed class DeviceCommandHandler
             $"  temperature: {options.TemperatureThreshold:F1} °C",
             $"  silence:     {options.SilenceTimeout.TotalSeconds:F1} s");
 
-    private string Status() =>
-        string.Join(Environment.NewLine, _devices.Values.Select(d => $"  {d.DeviceId}: {(d.IsOn ? "ON" : "OFF")}"));
+    private string Status()
+    {
+        string devices = string.Join(Environment.NewLine, _devices.Values.Select(d => $"  {d.DeviceId}: {(d.IsOn ? "ON" : "OFF")}"));
+        return _alertOptions is null
+            ? devices
+            : string.Join(Environment.NewLine, devices, "Alert thresholds:", DescribeThresholds(_alertOptions));
+    }
 }

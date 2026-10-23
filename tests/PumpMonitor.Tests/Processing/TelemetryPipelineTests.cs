@@ -28,8 +28,11 @@ public class TelemetryPipelineTests : IDisposable
         }
     }
 
-    /// <summary>Blocks inside the first reading until released, simulating a stalled handler.</summary>
-    private sealed class GatedHandler : ITelemetryHandler
+    /// <summary>
+    /// Blocks inside the first reading until released, simulating a stalled handler. With
+    /// <paramref name="ignoreCancellation"/> it keeps blocking when cancelled, like a synchronous console write.
+    /// </summary>
+    private sealed class GatedHandler(bool ignoreCancellation = false) : ITelemetryHandler
     {
         private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -44,7 +47,7 @@ public class TelemetryPipelineTests : IDisposable
             Entered.TrySetResult();
             try
             {
-                await _release.Task.WaitAsync(cancellationToken);
+                await _release.Task.WaitAsync(ignoreCancellation ? CancellationToken.None : cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -156,6 +159,29 @@ public class TelemetryPipelineTests : IDisposable
         await pipeline.StopAsync(new CancellationToken(canceled: true)).WaitAsync(Timeout);
 
         Assert.True(gate.SawCancellation);
+        Assert.Empty(recorder.Readings);
+    }
+
+    [Fact]
+    public async Task StopAsync_WhenCancelled_DiscardsQueuedReadingsEvenIfTheHandlerIgnoresCancellation()
+    {
+        var gate = new GatedHandler(ignoreCancellation: true);
+        var recorder = new RecordingHandler();
+        await using var pipeline = new TelemetryPipeline([gate, recorder], FailOnHandlerError);
+        pipeline.Start();
+        for (long seq = 1; seq <= 5; seq++)
+        {
+            await pipeline.Writer.WriteAsync(Reading("pump-1", seq));
+        }
+
+        await gate.Entered.Task.WaitAsync(Timeout);
+        Task stop = pipeline.StopAsync(new CancellationToken(canceled: true));
+        Assert.False(stop.IsCompleted, "stop should wait for the in-flight handler to return");
+
+        gate.Release();
+        await stop.WaitAsync(Timeout);
+
+        // Reading 1 was in flight when processing was abandoned; neither it nor the 4 queued behind it go further.
         Assert.Empty(recorder.Readings);
     }
 

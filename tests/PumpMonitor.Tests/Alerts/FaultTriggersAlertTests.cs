@@ -9,7 +9,7 @@ using PumpMonitor.Tests.Devices;
 namespace PumpMonitor.Tests.Alerts;
 
 /// <summary>
-/// End-to-end: each injected fault, aimed at the monitor's current options, must make the monitor raise the
+/// End-to-end: each injected fault, aimed at the alert options, must make the monitors raise the
 /// matching alert, across a range of threshold settings.
 /// </summary>
 public class FaultTriggersAlertTests
@@ -26,7 +26,7 @@ public class FaultTriggersAlertTests
             new StubPumpProcess(new ProcessState(55, 70)),
             new SimulatedDeviceOptions { MinInterval = Interval, MaxInterval = Interval },
             _time);
-        var monitor = new AlertMonitor(_alerts.Enqueue, options, ["pump-1"], _time);
+        var monitor = new AlertMonitor(_alerts.Enqueue, options, _time);
         return (device, monitor);
     }
 
@@ -71,13 +71,14 @@ public class FaultTriggersAlertTests
     [InlineData(12)]
     public async Task Silence_RaisesDeviceSilentBeforeReadingsResume(int timeoutSeconds)
     {
-        (SimulatedDevice device, AlertMonitor monitor) =
-            Create(new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(timeoutSeconds) });
+        var options = new AlertOptions { SilenceTimeout = TimeSpan.FromSeconds(timeoutSeconds) };
+        (SimulatedDevice device, _) = Create(options);
+        var silence = new SilenceMonitor(_alerts.Enqueue, options, ["pump-1"], _time);
         var channel = Channel.CreateUnbounded<TelemetryReading>();
         using var cts = new CancellationTokenSource();
 
-        device.InjectFault(DeviceFault.Silence, monitor.Options);
-        Task run = device.RunAsync(channel.Writer, cts.Token);
+        device.InjectFault(DeviceFault.Silence, options);
+        Task run = device.RunAsync(silence.Track(channel.Writer), cts.Token);
 
         // Step time like the app does (check every 500ms) until the device speaks again.
         bool silentAlertBeforeResume = false;
@@ -85,13 +86,12 @@ public class FaultTriggersAlertTests
         {
             _time.Advance(TimeSpan.FromMilliseconds(500));
             await Task.Delay(2);
-            if (channel.Reader.TryRead(out TelemetryReading? reading))
+            if (channel.Reader.TryRead(out _))
             {
-                await monitor.HandleAsync(reading, CancellationToken.None);
                 break;
             }
 
-            monitor.CheckForSilentDevices();
+            silence.CheckForSilentDevices();
             silentAlertBeforeResume |= _alerts.Any(a => a.Type == AlertType.DeviceSilent);
         }
 

@@ -30,11 +30,12 @@ SimulatedDevice[] devices = Enumerable.Range(1, deviceCount)
 // All console output goes through one object so log lines never break up the operator's typing.
 var ui = new ConsoleUi();
 
-var alerts = new AlertMonitor(
-    alert => ui.WriteLine(
-        $"!! ALERT {alert.Timestamp.ToLocalTime():HH:mm:ss.fff}  {alert.DeviceId,-7} {alert.Type}: {alert.Message}"),
-    expectedDeviceIds: devices.Select(d => d.DeviceId));
-var commands = new DeviceCommandHandler(devices, alerts, showReadings);
+var alertOptions = new AlertOptions();
+Action<Alert> printAlert = alert => ui.WriteLine(
+    $"!! ALERT {alert.Timestamp.ToLocalTime():HH:mm:ss.fff}  {alert.DeviceId,-7} {alert.Type}: {alert.Message}");
+var alerts = new AlertMonitor(printAlert, alertOptions);
+var silence = new SilenceMonitor(printAlert, alertOptions, devices.Select(d => d.DeviceId));
+var commands = new DeviceCommandHandler(devices, alertOptions, showReadings);
 
 // All devices write into the pipeline; its single consumer runs the handlers so producers never wait on them.
 await using var pipeline = new TelemetryPipeline(
@@ -45,13 +46,20 @@ pipeline.Start();
 using var shutdown = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
-    // Let Ctrl+C run the same graceful shutdown as 'quit' instead of killing the process.
-    e.Cancel = true;
-    shutdown.Cancel();
+    // Let Ctrl+C run the same graceful shutdown as 'quit' instead of killing the process. Once shutdown
+    // has started, Ctrl+C kills the process as usual, in case shutdown hangs.
+    if (!shutdown.IsCancellationRequested)
+    {
+        e.Cancel = true;
+        shutdown.Cancel();
+    }
 };
 
-Task[] producers = devices.Select(d => RunDeviceAsync(d, pipeline.Writer, ui, shutdown.Token)).ToArray();
-Task silenceWatch = alerts.RunSilenceWatchAsync(silenceCheckInterval, shutdown.Token);
+// Readings count as heard from when they're queued, so a backed-up pipeline isn't mistaken for silent devices.
+ChannelWriter<TelemetryReading> writer = silence.Track(pipeline.Writer);
+Task[] producers = devices.Select(d => RunDeviceAsync(d, writer, ui, shutdown.Token)).ToArray();
+Task silenceWatch = silence.RunAsync(
+    silenceCheckInterval, ex => ui.WriteError($"Silence check failed: {ex.Message}"), shutdown.Token);
 
 if (unknownArgs.Length > 0)
 {
@@ -64,15 +72,18 @@ ui.WriteLine(showReadings.IsOn
     : "Readings are hidden; only alerts are printed. Type 'readings on' (or start with --show-readings) to see them.");
 ui.WriteLine(DeviceCommandHandler.HelpText);
 
-await ReadCommandsAsync(commands, ui, shutdown);
-ui.Close();
-
-// Graceful shutdown: stop producers (and the silence watch, so stopped devices aren't reported as silent),
-// then let the pipeline drain what's queued (bounded by a timeout).
-shutdown.Cancel();
-await Task.WhenAll([.. producers, silenceWatch]);
-using (var drainCts = new CancellationTokenSource(drainTimeout))
+try
 {
+    await ReadCommandsAsync(commands, ui, shutdown);
+}
+finally
+{
+    // Graceful shutdown, even if the command loop failed: stop producers (and the silence watch, so stopped
+    // devices aren't reported as silent), then let the pipeline drain what's queued (bounded by a timeout).
+    ui.Close();
+    shutdown.Cancel();
+    await Task.WhenAll([.. producers, silenceWatch]);
+    using var drainCts = new CancellationTokenSource(drainTimeout);
     await pipeline.StopAsync(drainCts.Token);
 }
 
@@ -116,7 +127,18 @@ static async Task ReadCommandsAsync(DeviceCommandHandler commands, ConsoleUi ui,
             return; // stdin closed
         }
 
-        CommandResult result = commands.Execute(line);
+        CommandResult result;
+        try
+        {
+            result = commands.Execute(line);
+        }
+        catch (Exception ex)
+        {
+            // A failed command must not take the monitor down with it.
+            ui.WriteError($"Command failed: {ex.Message}");
+            continue;
+        }
+
         if (result.Message.Length > 0)
         {
             ui.WriteLine(result.Message);

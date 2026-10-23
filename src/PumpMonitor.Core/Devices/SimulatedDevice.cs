@@ -73,13 +73,13 @@ public sealed class SimulatedDevice
 
     /// <summary>
     /// Starts abnormal behaviour that is guaranteed to trip the matching alert under <paramref name="limits"/>
-    /// (the alert monitor's current options; defaults if omitted). Safe to call from any thread.
+    /// (the alert thresholds in use; defaults if omitted). Safe to call from any thread.
     /// </summary>
     /// <remarks>
     /// Spikes and overheats report <c>max(actual, threshold) + margin</c>, so the value is always strictly above
     /// the threshold however it is set, while the pump's normal curve carries on underneath and readings return
     /// to normal when the fault ends. Silence lasts the silence timeout plus a margin that covers the monitor's
-    /// check interval. Injecting a fault that is already active restarts it with the new limits.
+    /// check interval. Injecting a fault that is already active restarts it.
     /// </remarks>
     public void InjectFault(DeviceFault fault, AlertOptions? limits = null)
     {

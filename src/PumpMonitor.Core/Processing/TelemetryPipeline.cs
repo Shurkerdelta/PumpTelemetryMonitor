@@ -36,13 +36,14 @@ public sealed class TelemetryPipeline : IAsyncDisposable
     /// Exceptions thrown by the callback itself are ignored.
     /// </param>
     /// <param name="capacity">
-    /// Maximum queued readings before the oldest are dropped. 1000 is several seconds of readings from a
-    /// handful of devices: room for brief stalls without holding a backlog of stale data.
+    /// Maximum queued readings before the oldest are dropped. 3–5 devices reporting every 100–500 ms send
+    /// 10–17 readings a second, so 100 is 6–10 s of readings: room for brief stalls without holding a
+    /// backlog of stale data.
     /// </param>
     public TelemetryPipeline(
         IEnumerable<ITelemetryHandler> handlers,
         Action<TelemetryReading, Exception> onHandlerError,
-        int capacity = 1000)
+        int capacity = 100)
     {
         ArgumentNullException.ThrowIfNull(handlers);
         ArgumentNullException.ThrowIfNull(onHandlerError);
@@ -78,8 +79,9 @@ public sealed class TelemetryPipeline : IAsyncDisposable
 
     /// <summary>
     /// Closes the queue and waits for queued readings to be processed. If <paramref name="cancellationToken"/>
-    /// fires first, processing is abandoned: the in-flight handler is cancelled and the rest are discarded.
-    /// Safe to call more than once.
+    /// fires first, processing is abandoned: the in-flight handler's token is cancelled, no further handlers
+    /// run, and the remaining readings are discarded. It still waits for the in-flight handler to return, so a
+    /// handler that ignores its token delays shutdown. Safe to call more than once.
     /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
@@ -109,6 +111,9 @@ public sealed class TelemetryPipeline : IAsyncDisposable
             {
                 foreach (ITelemetryHandler handler in _handlers)
                 {
+                    // ReadAllAsync only checks the token while waiting for readings, and handlers may ignore it,
+                    // so without this an abandoned drain would still run every queued reading through every handler.
+                    _abort.Token.ThrowIfCancellationRequested();
                     try
                     {
                         await handler.HandleAsync(reading, _abort.Token);

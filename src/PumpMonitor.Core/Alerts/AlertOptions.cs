@@ -1,8 +1,7 @@
 namespace PumpMonitor.Core.Alerts;
 
 /// <summary>
-/// Thresholds used by <see cref="AlertMonitor"/>. Immutable: to change thresholds while running, build a
-/// new instance (e.g. <c>monitor.Options = monitor.Options with { PressureThreshold = 60 }</c>).
+/// Thresholds used by <see cref="AlertMonitor"/> and <see cref="SilenceMonitor"/>, fixed when they are created.
 /// </summary>
 public sealed record AlertOptions
 {
@@ -24,6 +23,12 @@ public sealed record AlertOptions
     /// <summary>Throws if any value is out of range.</summary>
     public void Validate()
     {
+        // No reading is ever above NaN, so a NaN threshold would silently switch that alert off.
+        if (!double.IsFinite(PressureThreshold) || !double.IsFinite(TemperatureThreshold))
+        {
+            throw new ArgumentException("PressureThreshold and TemperatureThreshold must be finite.");
+        }
+
         if (SilenceTimeout <= TimeSpan.Zero)
         {
             throw new ArgumentException("SilenceTimeout must be positive.");
