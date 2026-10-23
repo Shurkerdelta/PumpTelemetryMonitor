@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using PumpMonitor.Core.Processing;
 using PumpMonitor.Core.Telemetry;
 
@@ -61,6 +62,38 @@ public class TelemetryPipelineTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Blocks its thread, rather than awaiting, while handling <paramref name="blockOnSequence"/>, like a console write
+    /// stuck behind a paused terminal. It ignores cancellation, so it must be released before the pipeline is stopped.
+    /// </summary>
+    private sealed class BlockingHandler(long blockOnSequence) : ITelemetryHandler, IDisposable
+    {
+        private readonly ManualResetEventSlim _release = new();
+
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource PassedFirst { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Release() => _release.Set();
+
+        public ValueTask HandleAsync(TelemetryReading reading, CancellationToken cancellationToken)
+        {
+            if (reading.SequenceNumber == blockOnSequence)
+            {
+                Entered.TrySetResult();
+                _release.Wait();
+            }
+            else
+            {
+                PassedFirst.TrySetResult();
+            }
+
+            return ValueTask.CompletedTask;
+        }
+
+        public void Dispose() => _release.Dispose();
+    }
+
     private sealed class ThrowingHandler(long failOnSequence) : ITelemetryHandler
     {
         public ValueTask HandleAsync(TelemetryReading reading, CancellationToken cancellationToken) =>
@@ -122,6 +155,93 @@ public class TelemetryPipelineTests : IDisposable
         Assert.Equal(5, pipeline.DroppedCount);
         long[] expected = [1, .. Enumerable.Range(7, 10).Select(i => (long)i)];
         Assert.Equal(expected, recorder.Readings.Select(r => r.SequenceNumber));
+    }
+
+    [Fact]
+    public async Task HandlerBlockingItsThread_NeverRunsOnTheProducersThread()
+    {
+        using var blocker = new BlockingHandler(blockOnSequence: 2);
+        var recorder = new RecordingHandler();
+        await using var pipeline = new TelemetryPipeline([blocker, recorder], FailOnHandlerError);
+        pipeline.Start();
+
+        try
+        {
+            // Once reading 1 is through, the consumer goes back to waiting on the empty queue, so the next write is
+            // the one that wakes it. If that wake-up ran the handlers inline, the write would block with them.
+            await pipeline.Writer.WriteAsync(Reading("pump-1", 1));
+            await blocker.PassedFirst.Task.WaitAsync(Timeout);
+            await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+            Task producer = Task.Run(async () =>
+            {
+                for (long seq = 2; seq <= 4; seq++)
+                {
+                    await pipeline.Writer.WriteAsync(Reading("pump-1", seq));
+                }
+            });
+            await producer.WaitAsync(Timeout);
+            await blocker.Entered.Task.WaitAsync(Timeout);
+        }
+        finally
+        {
+            blocker.Release();
+        }
+
+        await pipeline.StopAsync().WaitAsync(Timeout);
+        Assert.Equal([1L, 2, 3, 4], recorder.Readings.Select(r => r.SequenceNumber));
+    }
+
+    [Fact]
+    public async Task Start_CalledConcurrently_StartsExactlyOneConsumer()
+    {
+        var recorder = new RecordingHandler();
+        await using var pipeline = new TelemetryPipeline([recorder], FailOnHandlerError);
+
+        // Dedicated threads released together by a barrier, so every caller races the same check.
+        const int callers = 8;
+        using var barrier = new Barrier(callers);
+        int rejected = 0;
+        Thread[] threads = [.. Enumerable.Range(0, callers).Select(_ => new Thread(() =>
+        {
+            barrier.SignalAndWait();
+            try
+            {
+                pipeline.Start();
+            }
+            catch (InvalidOperationException)
+            {
+                Interlocked.Increment(ref rejected);
+            }
+        }))];
+        foreach (Thread thread in threads)
+        {
+            thread.Start();
+        }
+
+        foreach (Thread thread in threads)
+        {
+            Assert.True(thread.Join(Timeout), "Start hung");
+        }
+
+        Assert.Equal(callers - 1, rejected);
+    }
+
+    [Fact]
+    public async Task Producers_CannotCompleteThePipeline()
+    {
+        var recorder = new RecordingHandler();
+        await using var pipeline = new TelemetryPipeline([recorder], FailOnHandlerError);
+        pipeline.Start();
+
+        // One producer giving up must not close the queue on the others, or fault the consumer and skip the drain.
+        Assert.False(pipeline.Writer.TryComplete(new InvalidOperationException("producer gave up")));
+        Assert.Throws<ChannelClosedException>(() => pipeline.Writer.Complete());
+        await pipeline.Writer.WriteAsync(Reading("pump-1", 1));
+
+        await pipeline.StopAsync().WaitAsync(Timeout);
+        Assert.Equal([1L], recorder.Readings.Select(r => r.SequenceNumber));
+        Assert.False(pipeline.Writer.TryWrite(Reading("pump-1", 2)));
     }
 
     [Fact]
